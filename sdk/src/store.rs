@@ -2112,8 +2112,9 @@ impl Store {
         let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?;
         pc.clear_data(); // clear since we are reusing an existing claim
 
-        let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
-        let dest_path = output_dir.join(output_filename);
+        // let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
+        // let dest_path = output_path.join(output_filename);
+        let dest_path = output_dir.to_owned();
 
         let mut data;
 
@@ -2169,7 +2170,7 @@ impl Store {
         &mut self,
         asset_path: &Path,
         fragments: &Vec<std::path::PathBuf>,
-        output_path: &Path,
+        output_path: &Path, // TODO make sure output_path doesn't get the appended extra stuff (see current signed_bbb)
         signer: &dyn Signer,
     ) -> Result<()> {
         match get_supported_file_extension(asset_path) {
@@ -2180,6 +2181,9 @@ impl Store {
             }
             None => return Err(Error::UnsupportedType),
         }
+        // let output_path = output_path
+        //     .parent()
+        //     .ok_or(Error::BadParam("output path has no parent".to_string()))?;
 
         let mut validation_log = OneShotStatusTracker::default();
         let jumbf = self.to_jumbf(signer)?;
@@ -2198,8 +2202,9 @@ impl Store {
         let sig = temp_store.sign_claim(pc, signer, signer.reserve_size())?;
         let sig_placeholder = Store::sign_claim_placeholder(pc, signer.reserve_size());
 
-        let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
-        let dest_path = output_path.join(output_filename);
+        // let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
+        // let dest_path = output_path.join(output_filename);
+        let dest_path = output_path.to_owned();
 
         match temp_store.finish_save(jumbf_bytes, &dest_path, sig, &sig_placeholder) {
             Ok(_) => Ok(()),

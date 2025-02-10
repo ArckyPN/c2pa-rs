@@ -986,6 +986,9 @@ impl BmffHash {
     ) -> crate::Result<()> {
         let max_proofs: usize = 4; // todo: calculate (number of hashes to perform vs size of manifest) or allow to be set
 
+        let output_dir = output_dir
+            .parent()
+            .ok_or(Error::BadParam("missing path parent".to_string()))?;
         if !output_dir.exists() {
             std::fs::create_dir_all(output_dir)?;
         } else {

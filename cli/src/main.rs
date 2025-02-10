@@ -21,8 +21,10 @@
 use std::{
     fs::{create_dir_all, remove_dir_all, remove_file, File},
     io::Write,
+    net::SocketAddr,
     path::{Path, PathBuf},
     str::FromStr,
+    sync::Arc,
 };
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -43,6 +45,8 @@ mod tree;
 
 mod callback_signer;
 mod signer;
+
+mod live;
 
 /// Tool for displaying and creating C2PA manifests.
 #[derive(Parser, Debug)]
@@ -184,6 +188,21 @@ enum Commands {
         #[arg(long = "fragments_glob", verbatim_doc_comment)]
         fragments_glob: Option<PathBuf>,
     },
+    Live {
+        /// listen address, receiver of FFMpeg output
+        #[arg(short, long, default_value = "[::]:6262")]
+        bind: SocketAddr,
+
+        /// target output URL to publish the signed stream to
+        #[arg(short, long, default_value = "https://localhost:6363/ingest/", value_parser = trailing_slash_url)]
+        target: Url,
+    },
+}
+
+fn trailing_slash_url(s: &str) -> Result<Url> {
+    let s = s.to_string();
+    let s = if s.ends_with("/") { s } else { s + "/" };
+    Url::parse(&s).context("failed parsing URL")
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -358,9 +377,14 @@ fn sign_fragmented(
                 }
 
                 println!("Adding manifest to: {:?}", p);
-                let new_output_path =
-                    output_path.join(init_dir.file_name().context("invalid file name")?);
-                builder.sign_fragmented_files(signer, &p, &fragments, &new_output_path)?;
+                // let new_output_path =
+                //     output_path.join(init_dir.file_name().context("invalid file name")?);
+                builder.sign_fragmented_files(
+                    signer,
+                    &p,
+                    &fragments,
+                    &output_path.to_path_buf(),
+                )?;
 
                 count += 1;
             }
@@ -427,11 +451,16 @@ fn verify_fragmented(init_pattern: &Path, frag_pattern: &Path) -> Result<Vec<Rea
 fn main() -> Result<()> {
     let args = CliArgs::parse();
 
+    // check for is not live first to skip <PATH> verification, not used anyways for live
+    let is_live = matches!(args.command, Some(Commands::Live { bind: _, target: _ }));
+
     // set RUST_LOG=debug to get detailed debug logging
-    if std::env::var("RUST_LOG").is_err() {
-        std::env::set_var("RUST_LOG", "error");
+    if !is_live {
+        if std::env::var("RUST_LOG").is_err() {
+            std::env::set_var("RUST_LOG", "error");
+        }
+        env_logger::init();
     }
-    env_logger::init();
 
     let path = &args.path;
 
@@ -592,6 +621,34 @@ fn main() -> Result<()> {
                 } else {
                     bail!("fragments_glob must be set");
                 }
+            } else if let Some(Commands::Live { bind, target }) = &args.command {
+                let rocket_config = rocket::Config {
+                    address: bind.ip(),
+                    port: bind.port(),
+                    ..Default::default()
+                };
+
+                let rocket = rocket::custom(rocket_config)
+                    .mount("/ingest", rocket::routes![live::routes::post_ingest])
+                    .manage(live::LiveSigner {
+                        media: output.clone(),
+                        target: target.to_owned(),
+                        client: reqwest::Client::new(),
+                        sync_client: Arc::new(reqwest::blocking::Client::new()),
+                        c2pa: live::c2pa_builder::C2PABuilder {
+                            manifest_json: json,
+                            base_path: base_path.expect("missing base path"),
+                        },
+                        regex: Arc::new(live::regexp::Regexp::default()),
+                    })
+                    .attach(rocket::fairing::AdHoc::on_shutdown("media cleaner", |_| {
+                        Box::pin(async move {
+                            if let Err(err) = live::utility::clear_media(output) {
+                                log::error!("failed to clean up media: {err}");
+                            }
+                        })
+                    }));
+                rocket::execute(rocket.launch())?;
             } else {
                 if ext_normal(&output) != ext_normal(&args.path) {
                     bail!("Output type must match source type");
