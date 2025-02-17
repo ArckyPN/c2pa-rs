@@ -126,6 +126,9 @@ impl LiveSigner {
         pairs.sort_by(|a, b| {
             // init always the very first
             if is_init(&a.0) {
+                return Ordering::Less;
+            }
+            if is_init(&b.0) {
                 return Ordering::Greater;
             }
             b.0.cmp(&a.0)
