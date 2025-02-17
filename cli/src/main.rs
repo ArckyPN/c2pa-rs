@@ -629,7 +629,10 @@ fn main() -> Result<()> {
                 };
 
                 let rocket = rocket::custom(rocket_config)
-                    .mount("/ingest", rocket::routes![live::routes::post_ingest])
+                    .mount(
+                        "/ingest",
+                        rocket::routes![live::routes::post_ingest, live::routes::delete_ingest],
+                    )
                     .manage(live::LiveSigner {
                         media: output.clone(),
                         target: target.to_owned(),

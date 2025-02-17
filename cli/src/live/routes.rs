@@ -47,3 +47,13 @@ pub(crate) async fn post_ingest(
         Status::InternalServerError
     })
 }
+
+#[rocket::delete("/<name>/<uri..>")]
+pub(crate) async fn delete_ingest(
+    name: &str,
+    uri: PathBuf,
+    state: &State<LiveSigner>,
+) -> Result<()> {
+    // TODO post delete to cdn to clear cache
+    Ok(())
+}
