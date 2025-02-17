@@ -17,7 +17,7 @@ pub(crate) mod routes;
 pub(crate) mod utility;
 
 use c2pa_builder::C2PABuilder;
-use regexp::{Regexp, UriInfo};
+use regexp::{FragmentIndex, Regexp, UriInfo};
 
 pub(crate) struct LiveSigner {
     /// local directory where to save the stream to
@@ -60,6 +60,12 @@ impl LiveSigner {
         let uri = uri.as_ref().as_os_str().to_str().context("invalid uri")?;
 
         Ok(self.target.join(&format!("{name}/{uri}"))?)
+    }
+
+    fn cdn_init_cache(&self, name: &str) -> Url {
+        let mut url = self.target.clone();
+        url.set_path(&format!("init/{name}"));
+        url
     }
 
     /// creates the output directory path of the signed content
@@ -227,6 +233,7 @@ impl LiveSigner {
         let forward = self.forward(name, uri)?;
         let client = self.sync_client.clone();
         let re = self.regex.clone();
+        let cdn = self.cdn_init_cache(name);
 
         ensure!(
             forward.len() >= 2,
@@ -241,9 +248,10 @@ impl LiveSigner {
                 let signer = builder.signer()?;
                 let mut c2pa = builder.builder()?;
 
+                clear_output(&output)?;
                 c2pa.sign_fragmented_files(signer.as_ref(), init, &fragments, output)?;
 
-                // TODO send special init with RepID and max Index
+                post_reference_init(&forward, cdn, client.clone(), re.clone())?;
 
                 for (path, url) in forward {
                     let buf = std::fs::read(path)?;
@@ -257,4 +265,36 @@ impl LiveSigner {
 
         Ok(())
     }
+}
+
+fn post_reference_init(
+    forward: &[(PathBuf, Url)],
+    origin: Url,
+    client: Arc<reqwest::blocking::Client>,
+    re: Arc<Regexp>,
+) -> Result<()> {
+    let mut cdn = origin;
+    let init = &forward[0].0;
+    let newest_fragment = &forward[1].0;
+    let UriInfo { rep_id, index } = re.uri(newest_fragment)?;
+
+    let init = std::fs::read(init)?;
+    let index = match index {
+        FragmentIndex::Index(i) => i,
+        FragmentIndex::Init => bail!("second fragment should not be the init"),
+    };
+    cdn.set_query(Some(&format!("rep={rep_id}&index={index}")));
+    client.post(cdn).body(init).send()?;
+    Ok(())
+}
+
+fn clear_output<P>(init: P) -> Result<()>
+where
+    P: AsRef<Path>,
+{
+    let dir = init.as_ref().parent().context("output has no parent")?;
+    if std::fs::exists(dir)? {
+        std::fs::remove_dir_all(dir)?;
+    }
+    Ok(())
 }
