@@ -104,6 +104,8 @@ impl LiveSigner {
 
         let init = init.context("missing init file")?;
 
+        fragments.sort();
+
         Ok((init, fragments))
     }
 
