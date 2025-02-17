@@ -54,6 +54,15 @@ pub(crate) async fn delete_ingest(
     uri: PathBuf,
     state: &State<LiveSigner>,
 ) -> Result<()> {
-    // TODO post delete to cdn to clear cache
+    let target = state.cdn_url(name, &uri).map_err(|err| {
+        log::error!("building CDN URL: {err}");
+        Status::InternalServerError
+    })?;
+
+    state.delete(target).await.map_err(|err| {
+        log::error!("deleting {name}/{} on CDN: {err}", uri.display());
+        Status::InternalServerError
+    })?;
+
     Ok(())
 }

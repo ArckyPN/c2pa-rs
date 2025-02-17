@@ -223,6 +223,14 @@ impl LiveSigner {
         Ok(res)
     }
 
+    pub async fn delete<U>(&self, url: U) -> Result<Response>
+    where
+        U: IntoUrl,
+    {
+        let res = self.client.delete(url).send().await?;
+        Ok(res)
+    }
+
     pub fn sign<P>(&self, name: &str, uri: P) -> Result<()>
     where
         P: AsRef<Path>,
