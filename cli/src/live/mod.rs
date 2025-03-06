@@ -264,7 +264,7 @@ impl LiveSigner {
                 for (path, url) in forward {
                     let buf = std::fs::read(path)?;
 
-                    // TODO chunked transfer
+                    // TODO chunked transfer?
                     client.post(url).body(buf).send()?;
                 }
 
