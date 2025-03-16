@@ -43,7 +43,7 @@ impl Regexp {
 impl Default for Regexp {
     fn default() -> Self {
         Self {
-            fragment: Regex::new(r"fragment_(?P<rep>\d+)_0*(?P<index>\d+|init)\.m4s").unwrap(),
+            fragment: Regex::new(r"(?P<rep>\d+)/segment_0*(?P<index>\d+|init)\.m4s").unwrap(),
         }
     }
 }

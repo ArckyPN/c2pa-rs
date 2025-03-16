@@ -196,6 +196,10 @@ enum Commands {
         /// target output URL to publish the signed stream to
         #[arg(short, long, default_value = "https://localhost:6363/ingest/", value_parser = trailing_slash_url)]
         target: Url,
+
+        /// the size of the Merkle Tree Groups
+        #[arg(short = 'w', long = "window")]
+        window_size: usize,
     },
 }
 
@@ -452,7 +456,14 @@ fn main() -> Result<()> {
     let args = CliArgs::parse();
 
     // check for is not live first to skip <PATH> verification, not used anyways for live
-    let is_live = matches!(args.command, Some(Commands::Live { bind: _, target: _ }));
+    let is_live = matches!(
+        args.command,
+        Some(Commands::Live {
+            bind: _,
+            target: _,
+            window_size: _
+        })
+    );
 
     // set RUST_LOG=debug to get detailed debug logging
     if !is_live {
@@ -621,7 +632,12 @@ fn main() -> Result<()> {
                 } else {
                     bail!("fragments_glob must be set");
                 }
-            } else if let Some(Commands::Live { bind, target }) = &args.command {
+            } else if let Some(Commands::Live {
+                bind,
+                target,
+                window_size,
+            }) = &args.command
+            {
                 let rocket_config = rocket::Config {
                     address: bind.ip(),
                     port: bind.port(),
@@ -643,6 +659,7 @@ fn main() -> Result<()> {
                             base_path: base_path.expect("missing base path"),
                         },
                         regex: Arc::new(live::regexp::Regexp::default()),
+                        window_size: *window_size,
                     })
                     .attach(rocket::fairing::AdHoc::on_shutdown("media cleaner", |_| {
                         Box::pin(async move {

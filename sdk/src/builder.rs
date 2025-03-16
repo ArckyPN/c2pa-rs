@@ -1064,6 +1064,85 @@ impl Builder {
         )
     }
 
+    /// Sign a partially completed fragmented BMFF file set.
+    ///
+    /// This is used to sign a live stream which is periodically
+    /// adding new fragments to the set. Fragments are grouped
+    /// into separate Merkle Trees to make signing more efficient.
+    ///
+    /// The argument `window_size` sets the group size (0 to disable
+    /// and use the same logic as `sign_fragmented_files`). Ideally
+    /// use a power of 2 (2, 4, 8, 16, etc.).
+    ///
+    /// This way only the fragments in the current incomplete
+    /// group will have to be altered (and subsequently forwarded
+    /// to the destination). All previously signed fragments
+    /// remain unchanged after their corresponding group has been
+    /// completed.
+    ///
+    /// # Arguments
+    /// * `signer` - The signer to use.
+    /// * `init_file` - The path to the primary asset file. This
+    ///     should be the signed init file after the first fragment
+    ///     of the live stream has bee signed
+    /// * `fragment_paths` - The paths to the fragmented files.
+    /// * `output_path` - The path to the output file.
+    /// * `window_size` - How many fragments are to be grouped
+    ///     into one Merkle Tree.
+    ///
+    /// # Errors
+    /// * Returns an [`Error`] if the manifest cannot be signed.
+    #[cfg(feature = "file_io")]
+    pub fn sign_live_bmff<P>(
+        &mut self,
+        signer: &dyn Signer,
+        init_file: P,
+        fragment_paths: &[std::path::PathBuf],
+        output_path: P,
+        window_size: usize,
+    ) -> Result<()>
+    where
+        P: AsRef<Path>,
+    {
+        if window_size == 0 {
+            return self.sign_fragmented_files(
+                signer,
+                init_file,
+                &fragment_paths.to_vec(),
+                output_path,
+            );
+        }
+
+        // ugly hack to skip the error of already existing output from
+        // `set_asset_from_dest`
+        let path = output_path.as_ref();
+        if !path.exists() {
+            // ensure the path to the file exists
+            if let Some(output_dir) = path.parent() {
+                std::fs::create_dir_all(output_dir)?;
+            }
+        }
+        self.definition.format =
+            crate::format_from_path(path).ok_or(crate::Error::UnsupportedType)?;
+        self.definition.instance_id = format!("xmp:iid:{}", Uuid::new_v4());
+        if self.definition.title.is_none() {
+            if let Some(title) = path.file_name() {
+                self.definition.title = Some(title.to_string_lossy().to_string());
+            }
+        }
+
+        // convert the manifest to a store
+        let mut store = self.to_store()?;
+
+        store.save_to_live_bmff(
+            signer,
+            init_file.as_ref(),
+            fragment_paths,
+            output_path.as_ref(),
+            window_size,
+        )
+    }
+
     #[cfg(feature = "file_io")]
     /// Sign a file using a supplied signer.
     /// # Arguments

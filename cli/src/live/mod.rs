@@ -37,6 +37,9 @@ pub(crate) struct LiveSigner {
 
     /// helper Regex
     pub regex: Arc<Regexp>,
+
+    /// Merkle Tree group size
+    pub window_size: usize,
 }
 
 impl LiveSigner {
@@ -68,7 +71,8 @@ impl LiveSigner {
         url
     }
 
-    /// creates the output directory path of the signed content
+    /// converts the given init file to its corresponding
+    /// output path
     ///
     /// `<media>/signed_<name>/`
     fn output<P>(&self, name: &str, init: P) -> Result<PathBuf>
@@ -81,14 +85,15 @@ impl LiveSigner {
     /// creates the output directory path of the original content
     ///
     /// `<media>/<name>/`
-    fn local(&self, name: &str) -> PathBuf {
-        self.media.join(name)
+    fn local(&self, name: &str, rep_id: u8) -> PathBuf {
+        self.media.join(name).join(rep_id.to_string())
     }
 
-    /// finds all associated init and fragment paths
+    /// finds all paths associated with the given uri
+    /// used to add this file to the signed stream
     ///
     /// returns (init path, fragment paths)
-    fn signed_paths<P>(&self, name: &str, uri: P) -> Result<(PathBuf, Vec<PathBuf>)>
+    fn paths_to_sign<P>(&self, name: &str, uri: P) -> Result<(PathBuf, Vec<PathBuf>)>
     where
         P: AsRef<Path>,
     {
@@ -117,6 +122,9 @@ impl LiveSigner {
 
     /// collects all local signed paths + forward CDN URL pairs
     ///
+    /// this only includes the last Merkle Tree group, according
+    /// to the configured window_size
+    ///
     /// returns Vec<(local path, forward URL)>
     fn forward<P>(&self, name: &str, uri: P) -> Result<Vec<(PathBuf, Url)>>
     where
@@ -131,6 +139,7 @@ impl LiveSigner {
             ));
         }
 
+        // sort in ascending order, init fragment first
         pairs.sort_by(|a, b| {
             // init always the very first
             if is_init(&a.0) {
@@ -139,8 +148,23 @@ impl LiveSigner {
             if is_init(&b.0) {
                 return Ordering::Greater;
             }
-            b.0.cmp(&a.0)
+            a.0.cmp(&b.0)
         });
+
+        let init = pairs[0].clone();
+        ensure!(is_init(&init.0), "first forward pair is not init");
+
+        // get the final group, which is being newly signed
+        let mut pairs = pairs[1..]
+            .chunks(self.window_size)
+            .last()
+            .context("missing fragments")?
+            .to_vec();
+
+        pairs.push(init);
+
+        // reverse order to have init first and then the newest fragment first
+        pairs.reverse();
 
         Ok(pairs)
     }
@@ -190,7 +214,7 @@ impl LiveSigner {
         let mut paths = Vec::new();
         let UriInfo { rep_id, index: _ } = self.regex.uri(uri)?;
 
-        for entry in self.local(name).read_dir()? {
+        for entry in self.local(name, rep_id).read_dir()? {
             let entry = entry?;
             let path = entry.path();
 
@@ -236,12 +260,13 @@ impl LiveSigner {
         P: AsRef<Path>,
     {
         let thread_name = format!("{name} - {:?}", uri.as_ref());
-        let (init, fragments) = self.signed_paths(name, &uri)?;
+        let (init, fragments) = self.paths_to_sign(name, &uri)?;
         let output = self.output(name, &init)?;
         let forward = self.forward(name, uri)?;
         let client = self.sync_client.clone();
         let re = self.regex.clone();
         let cdn = self.cdn_init_cache(name);
+        let window_size = self.window_size;
 
         ensure!(
             forward.len() >= 2,
@@ -256,9 +281,15 @@ impl LiveSigner {
                 let signer = builder.signer()?;
                 let mut c2pa = builder.builder()?;
 
-                clear_output(&output)?;
-                c2pa.sign_fragmented_files(signer.as_ref(), init, &fragments, output)?;
+                // c2pa.sign_fragmented_files(signer.as_ref(), init, &fragments, output)?;
+                if let Err(err) =
+                    c2pa.sign_live_bmff(signer.as_ref(), init, &fragments, output, window_size)
+                {
+                    log::error!("Sign: {err}");
+                    bail!("Sign: {err}")
+                }
 
+                // TODO test if I maybe don't need this anymore
                 post_reference_init(&forward, cdn, client.clone(), re.clone())?;
 
                 for (path, url) in forward {
@@ -293,16 +324,5 @@ fn post_reference_init(
     };
     cdn.set_query(Some(&format!("rep={rep_id}&index={index}")));
     client.post(cdn).body(init).send()?;
-    Ok(())
-}
-
-fn clear_output<P>(init: P) -> Result<()>
-where
-    P: AsRef<Path>,
-{
-    let dir = init.as_ref().parent().context("output has no parent")?;
-    if std::fs::exists(dir)? {
-        std::fs::remove_dir_all(dir)?;
-    }
     Ok(())
 }

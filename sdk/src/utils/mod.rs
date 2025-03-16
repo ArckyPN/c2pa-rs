@@ -11,6 +11,8 @@
 // specific language governing permissions and limitations under
 // each license.
 
+pub(crate) mod live;
+
 pub(crate) mod cbor_types;
 
 mod debug_byte_slice;
