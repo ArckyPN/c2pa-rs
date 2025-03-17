@@ -9,9 +9,6 @@ use super::{
 
 pub(super) type Result<T> = core::result::Result<T, Status>;
 
-// TODO split this up into two routes
-//  1. /<name>/<file> -> for manifest files (mpd, playlists)
-//  2. /<name>/<rep_id>/<file> -> fragments
 #[rocket::post("/<name>/<uri..>", data = "<body>")]
 pub(crate) async fn post_ingest(
     name: &str,

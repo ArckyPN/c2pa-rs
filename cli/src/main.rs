@@ -31,6 +31,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use c2pa::{Builder, ClaimGeneratorInfo, Error, Ingredient, ManifestDefinition, Reader, Signer};
 use clap::{Parser, Subcommand};
 use log::debug;
+use rocket::config::LogLevel;
 use serde::Deserialize;
 use signer::SignConfig;
 use url::Url;
@@ -641,6 +642,7 @@ fn main() -> Result<()> {
                 let rocket_config = rocket::Config {
                     address: bind.ip(),
                     port: bind.port(),
+                    log_level: LogLevel::Normal,
                     ..Default::default()
                 };
 
