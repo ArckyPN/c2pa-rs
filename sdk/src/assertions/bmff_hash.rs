@@ -1015,40 +1015,27 @@ impl BmffHash {
         // if it does exist save output path to fragments
         let mut fragments = Vec::new();
         for file_path in fragment_paths {
-            // TODO add this back in when its working again and trying to optimize it again
-            // match crate::utils::live::signed_output(file_path, &output_file.to_path_buf())? {
-            //     Some(out) => {
-            //         fragments.push(out);
-            //     }
-            //     None => {
-            //         fragments.push(file_path.to_path_buf());
-
-            //         let output_path = output_dir.join(
-            //             file_path
-            //                 .file_name()
-            //                 .ok_or(Error::BadParam("file name not found".to_string()))?,
-            //         );
-            //         std::fs::copy(file_path, output_path)?;
-            //     }
-            // }
-            fragments.push(file_path.to_path_buf());
-
             let output_path = output_dir.join(
                 file_path
                     .file_name()
                     .ok_or(Error::BadParam("file name not found".to_string()))?,
             );
-            std::fs::copy(file_path, output_path)?;
+            if output_path.exists() {
+                fragments.push(output_path);
+            } else {
+                fragments.push(file_path.to_path_buf());
+                std::fs::copy(file_path, output_path)?;
+            }
         }
 
         // copy init file to output if it doesn't already exist
-        if crate::utils::live::signed_output(asset_path, output_file)?.is_none() {
-            let output_path = output_dir.join(
-                asset_path
-                    .file_name()
-                    .ok_or(Error::BadParam("file name not found".to_string()))?,
-            );
-            std::fs::copy(asset_path, &output_path)?;
+        let init_output = output_dir.join(
+            asset_path
+                .file_name()
+                .ok_or(Error::BadParam("file name not found".to_string()))?,
+        );
+        if !init_output.exists() {
+            std::fs::copy(asset_path, &init_output)?;
         }
 
         // create dummy tree to figure out the layout and proof size
@@ -1070,22 +1057,23 @@ impl BmffHash {
                 return Err(Error::BadParam("expected 1 mdat in fragment".to_string()));
             }
 
-            // we don't currently support adding to fragments with existing manifests
-            // if !c2pa_boxes.bmff_merkle.is_empty() {
-            //     return Err(Error::BadParam(
-            //         "fragment already contains BmffMerkeMap".to_string(),
-            //     ));
-            // }
+            // ensure there aren't more than one uuid box
+            if c2pa_boxes.bmff_merkle.len() > 1 || c2pa_boxes.bmff_merkle_box_infos.len() > 1 {
+                return Err(Error::BadParam(
+                    "BMFF Fragments shouldn't have more than 1 BmffMerkleMap".to_string(),
+                ));
+            }
 
-            let dest_path = output_dir.join(
-                seg.file_name()
-                    .ok_or(Error::BadParam("file name not found".to_string()))?,
-            );
+            let dest_path = if c2pa_boxes.bmff_merkle.is_empty() {
+                &output_dir.join(
+                    seg.file_name()
+                        .ok_or(Error::BadParam("file name not found".to_string()))?,
+                )
+            } else {
+                seg
+            };
 
-            // TODO better to check if proofs change then update uuid in existing segment (before hashing)
-            // replace the UUID because it likely changes in size,
-            // because a new proof hash might be added
-            // (BMFF Box location is important for hashing)
+            // insert / update the Merkle Map
             let mut mm = BmffMerkleMap {
                 unique_id,
                 local_id,
@@ -1117,25 +1105,36 @@ impl BmffHash {
                 &mm_cbor,
             )?;
 
-            // insert uuid box before moof box
-            let first_moof = box_infos
-                .iter()
-                .find(|b| b.path == "moof")
-                .ok_or(Error::BadParam("expected 1 moof in fragment".to_string()))?;
+            let mut source = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(seg)?;
+            if c2pa_boxes.bmff_merkle.is_empty() {
+                // insert uuid box before moof box
+                let mut dest = std::fs::OpenOptions::new().write(true).open(dest_path)?;
 
-            let mut source = std::fs::File::open(seg)?;
-            let mut dest = std::fs::OpenOptions::new().write(true).open(&dest_path)?;
+                let first_moof = box_infos
+                    .iter()
+                    .find(|b| b.path == "moof")
+                    .ok_or(Error::BadParam("expected 1 moof in fragment".to_string()))?;
 
-            // UUID to insert into output asset
-            crate::utils::io_utils::insert_data_at(
-                &mut source,
-                &mut dest,
-                first_moof.offset,
-                &uuid_box_data,
-            )?;
+                crate::utils::io_utils::insert_data_at(
+                    &mut source,
+                    &mut dest,
+                    first_moof.offset,
+                    &uuid_box_data,
+                )?;
+            } else {
+                // replace existing UUID box
+                crate::utils::live::replace_c2pa_box(
+                    &mut source,
+                    &uuid_box_data,
+                    Some(c2pa_boxes.bmff_merkle_box_infos[0].offset),
+                )?;
+            }
 
             // save file path for each which location in Merkle tree
-            location_to_fragment_map.insert(location as u32, dest_path);
+            location_to_fragment_map.insert(location as u32, dest_path.to_path_buf());
         }
 
         // fill in actual hashes now that we have inserted the C2PA box.
@@ -1242,13 +1241,13 @@ impl BmffHash {
         if let Some(merkle) = self.merkle.as_mut() {
             // if merkle is already initialized append or replace Merkle Map
             for m in merkle.iter_mut() {
-                // replace then local/unique ID is found
+                // replace the MerkleMap with matching unique/local IDs
                 if m.local_id == mm.local_id && m.unique_id == mm.unique_id {
                     *m = mm;
                     return Ok(());
                 }
             }
-            // otherwise append
+            // otherwise append when it's new
             merkle.push(mm);
         } else {
             // initialisation, the first Merkle Tree
