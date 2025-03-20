@@ -46,7 +46,7 @@ where
     file.read_exact(&mut size)?;
     let size = u32::from_be_bytes(size) as u64;
 
-    // buffer every after the uuid box
+    // buffer everything after the uuid box
     file.seek(SeekFrom::Start(start + size))?;
     let mut remainder = Vec::new();
     file.read_to_end(&mut remainder)?;
