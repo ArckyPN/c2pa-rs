@@ -2107,31 +2107,86 @@ impl Store {
         fragments: &Vec<std::path::PathBuf>,
         output_dir: &Path,
         reserve_size: usize,
+        window_size: usize,
     ) -> Result<Vec<u8>> {
         // get the provenance claim changing mutability
         let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?;
         pc.clear_data(); // clear since we are reusing an existing claim
 
-        // let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
-        // let dest_path = output_path.join(output_filename);
-        let dest_path = output_dir.to_owned();
-
-        let mut data;
+        // use existing signed asset file if available
+        let asset_path = crate::utils::live::signed_output(asset_path, output_dir)?
+            .unwrap_or(asset_path.to_path_buf());
 
         // 2) Get hash ranges if needed
-        let mut asset_stream = std::fs::File::open(asset_path)?;
-        let mut bmff_hash =
-            Store::generate_bmff_data_hash_for_stream(&mut asset_stream, pc.alg(), false, false)?;
+        let mut asset_stream = std::fs::File::open(&asset_path)?;
+
+        // attempt to extract BMFF Hashes from asset
+        let mut bmff_hash = None;
+        if let Ok(reader) = crate::Reader::from_stream("m4s", &asset_stream) {
+            if let Some(manifest) = reader.active_manifest() {
+                for assertion in manifest.assertions() {
+                    if assertion
+                        .label()
+                        .starts_with(crate::assertions::labels::BMFF_HASH)
+                    {
+                        let mut b: BmffHash = assertion.to_assertion()?;
+                        // set version to 2, because serializing skips this and inits it to 0
+                        b.set_bmff_version(2);
+                        bmff_hash = Some(b);
+                    }
+                }
+            }
+        }
+        // init new ones if none found
+        let mut bmff_hash = bmff_hash.unwrap_or(Store::generate_bmff_data_hash_for_stream(
+            &mut asset_stream,
+            pc.alg(),
+            false,
+            false,
+        )?);
         bmff_hash.clear_hash();
+
+        // get the fragment paths that are to be signed and the Merkle Tree ID
+        let (sign_fragments, local_id, unique_id) = if window_size == 0 {
+            // all paths for window size 0 (original behaviour)
+            (fragments, 1, None)
+        } else {
+            // only the last Group of window size
+            let mut groups = fragments.chunks(window_size);
+
+            // there should be at least one group
+            let Some(mut current) = groups.next() else {
+                return Err(Error::BadParam("no fragments given".to_string()));
+            };
+
+            let mut local_id = 1;
+            let unique_id = 1;
+            let last = loop {
+                match groups.next() {
+                    Some(next) => {
+                        local_id += 1;
+
+                        // step to the next group
+                        current = next;
+                    }
+                    None => {
+                        // last group found
+                        break current;
+                    }
+                }
+            };
+
+            (&last.to_vec(), local_id, Some(unique_id))
+        };
 
         // generate fragments and produce Merkle tree
         bmff_hash.add_merkle_for_fragmented(
             pc.alg(),
-            asset_path,
-            fragments,
+            &asset_path,
+            sign_fragments,
             output_dir,
-            1,
-            None,
+            local_id,
+            unique_id,
         )?;
 
         // add in the BMFF assertion
@@ -2140,9 +2195,9 @@ impl Store {
         // 3) Generate in memory CAI jumbf block
         // and write preliminary jumbf store to file
         // source and dest the same so save_jumbf_to_file will use the same file since we have already cloned
-        data = self.to_jumbf_internal(reserve_size)?;
+        let mut data = self.to_jumbf_internal(reserve_size)?;
         let jumbf_size = data.len();
-        save_jumbf_to_file(&data, &dest_path, Some(&dest_path))?;
+        save_jumbf_to_file(&data, output_dir, Some(output_dir))?;
 
         // generate actual hash values
         let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?; // reborrow to change mutability
@@ -2151,7 +2206,7 @@ impl Store {
 
         if !bmff_hashes.is_empty() {
             let mut bmff_hash = BmffHash::from_assertion(bmff_hashes[0])?;
-            bmff_hash.update_fragmented_inithash(&dest_path)?;
+            bmff_hash.update_fragmented_inithash(output_dir)?;
             pc.update_bmff_hash(bmff_hash)?;
         }
 
@@ -2170,8 +2225,9 @@ impl Store {
         &mut self,
         asset_path: &Path,
         fragments: &Vec<std::path::PathBuf>,
-        output_path: &Path, // TODO make sure output_path doesn't get the appended extra stuff (see current signed_bbb)
+        output_path: &Path,
         signer: &dyn Signer,
+        window_size: usize,
     ) -> Result<()> {
         match get_supported_file_extension(asset_path) {
             Some(ext) => {
@@ -2181,9 +2237,6 @@ impl Store {
             }
             None => return Err(Error::UnsupportedType),
         }
-        // let output_path = output_path
-        //     .parent()
-        //     .ok_or(Error::BadParam("output path has no parent".to_string()))?;
 
         let mut validation_log = OneShotStatusTracker::default();
         let jumbf = self.to_jumbf(signer)?;
@@ -2196,52 +2249,6 @@ impl Store {
             fragments,
             output_path,
             signer.reserve_size(),
-        )?;
-
-        let pc = temp_store.provenance_claim().ok_or(Error::ClaimEncoding)?;
-        let sig = temp_store.sign_claim(pc, signer, signer.reserve_size())?;
-        let sig_placeholder = Store::sign_claim_placeholder(pc, signer.reserve_size());
-
-        // let output_filename = asset_path.file_name().ok_or(Error::NotFound)?;
-        // let dest_path = output_path.join(output_filename);
-        let dest_path = output_path.to_owned();
-
-        match temp_store.finish_save(jumbf_bytes, &dest_path, sig, &sig_placeholder) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Embed the claims store as jumbf into a live stream.
-    #[cfg(feature = "file_io")]
-    pub fn save_to_live_bmff(
-        &mut self,
-        signer: &dyn Signer,
-        init_file: &Path,
-        fragment_paths: &[std::path::PathBuf],
-        output_path: &Path,
-        window_size: usize,
-    ) -> Result<()> {
-        match get_supported_file_extension(init_file) {
-            Some(ext) => {
-                if !is_bmff_format(&ext) {
-                    return Err(Error::UnsupportedType);
-                }
-            }
-            None => return Err(Error::UnsupportedType),
-        }
-
-        let mut validation_log = OneShotStatusTracker::default();
-        let jumbf = self.to_jumbf(signer)?;
-
-        // use temp store so mulitple calls will work (the Store is not finalized this way)
-        let mut temp_store = Store::from_jumbf(&jumbf, &mut validation_log)?;
-
-        let jumbf_bytes = temp_store.start_save_live_bmff(
-            init_file,
-            fragment_paths,
-            output_path,
-            signer.reserve_size(),
             window_size,
         )?;
 
@@ -2249,128 +2256,10 @@ impl Store {
         let sig = temp_store.sign_claim(pc, signer, signer.reserve_size())?;
         let sig_placeholder = Store::sign_claim_placeholder(pc, signer.reserve_size());
 
-        temp_store
-            .finish_save(jumbf_bytes, output_path, sig, &sig_placeholder)
-            .map(|_| ())
-    }
-
-    #[cfg(feature = "file_io")]
-    fn start_save_live_bmff(
-        &mut self,
-        init_file: &Path,
-        fragment_paths: &[std::path::PathBuf],
-        output_path: &Path,
-        reserve_size: usize,
-        window_size: usize,
-    ) -> Result<Vec<u8>> {
-        // get the provenance claim changing mutability
-
-        use crate::utils;
-        let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?;
-        pc.clear_data(); // clear since we are reusing an existing claim
-
-        let dest_path = output_path.to_owned();
-
-        let mut data;
-
-        // if a signed init already exists use it instead
-        let file = match utils::live::signed_output(init_file, output_path)? {
-            Some(out) => out,
-            None => init_file.to_path_buf(),
-        };
-
-        // 2) Get hash ranges if needed
-        let mut asset_stream = std::fs::File::open(&file)?;
-
-        // attempt to extract the BMFF Hashes from the output
-        let mut bmff_hash = None;
-        if let Ok(reader) = crate::Reader::from_stream("m4s", &asset_stream) {
-            if let Some(manifest) = reader.active_manifest() {
-                for assertion in manifest.assertions() {
-                    if assertion.label().starts_with(labels::BMFF_HASH) {
-                        bmff_hash = assertion.to_assertion().ok();
-                    }
-                }
-            }
+        match temp_store.finish_save(jumbf_bytes, output_path, sig, &sig_placeholder) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
         }
-
-        // if no BMFF Hashes were extracted init new ones
-        let mut bmff_hash = bmff_hash.unwrap_or(Store::generate_bmff_data_hash_for_stream(
-            &mut asset_stream,
-            pc.alg(),
-            false,
-            false,
-        )?);
-        bmff_hash.clear_hash();
-
-        // generate fragments and produce Merkle tree
-        // splitting the fragment into `window_size` groups
-        let mut groups = fragment_paths.chunks(window_size);
-
-        // there should be at least one group
-        let Some(mut current) = groups.next() else {
-            return Err(Error::BadParam("no fragments given".to_string()));
-        };
-
-        // re-use the Merkle Trees of the already signed groups
-        // the last group will require new signatures
-        let last;
-        let mut local_id = 1;
-        let unique_id = 1; // TODO maybe use RepID as unique ID
-        loop {
-            match groups.next() {
-                Some(next) => {
-                    local_id += 1;
-
-                    // step to the next group
-                    current = next;
-                }
-                None => {
-                    // current is the final group
-                    last = current;
-                    break;
-                }
-            }
-        }
-
-        // update the hashes of the final group
-        bmff_hash.add_merkle_for_fragmented(
-            pc.alg(),
-            &file,
-            &last.to_vec(),
-            output_path,
-            local_id,
-            Some(unique_id),
-        )?;
-
-        // add in the BMFF assertion
-        pc.add_assertion(&bmff_hash)?;
-
-        // 3) Generate in memory CAI jumbf block
-        // and write preliminary jumbf store to file
-        // source and dest the same so save_jumbf_to_file will use the same file since we have already cloned
-        data = self.to_jumbf_internal(reserve_size)?;
-        let jumbf_size = data.len();
-        save_jumbf_to_file(&data, &dest_path, Some(&dest_path))?;
-
-        // generate actual hash values
-        let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?; // reborrow to change mutability
-
-        let bmff_hashes = pc.bmff_hash_assertions();
-
-        if !bmff_hashes.is_empty() {
-            let mut bmff_hash = BmffHash::from_assertion(bmff_hashes[0])?;
-            bmff_hash.update_fragmented_inithash(&dest_path)?;
-            pc.update_bmff_hash(bmff_hash)?;
-        }
-
-        // regenerate the jumbf because the cbor changed
-        data = self.to_jumbf_internal(reserve_size)?;
-        if jumbf_size != data.len() {
-            return Err(Error::JumbfCreationError);
-        }
-
-        Ok(data) // return JUMBF data
     }
 
     /// Embed the claims store as jumbf into a stream. Updates XMP with provenance record.
@@ -6595,6 +6484,7 @@ pub mod tests {
                             &fragments,
                             new_output_path.as_path(),
                             signer.as_ref(),
+                            0,
                         )
                         .unwrap();
 

@@ -1,4 +1,7 @@
 {
+  "alg": "es256",
+  "private_key": "es256_private.key",
+  "sign_cert": "es256_certs.pem",
   "claim_version": 1,
   "ta_url": "http://timestamp.digicert.com",
   "claim_generator_info":[{

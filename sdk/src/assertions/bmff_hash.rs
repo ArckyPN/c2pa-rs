@@ -322,7 +322,7 @@ impl BmffHash {
         self.bmff_version
     }
 
-    fn set_bmff_version(&mut self, version: usize) {
+    pub(crate) fn set_bmff_version(&mut self, version: usize) {
         self.bmff_version = version;
     }
 
@@ -391,26 +391,34 @@ impl BmffHash {
     ) -> crate::error::Result<()> {
         if let Some(mm) = &mut self.merkle {
             let mut init_stream = std::fs::File::open(asset_path)?;
-            let mpd_mm = mm.get_mut(0).ok_or(Error::NotFound)?;
 
-            let curr_alg = match &mpd_mm.alg {
-                Some(a) => a.clone(),
+            // TODO better: ensure all MerkleMap's have the same alg
+            // get the first MerkleMap with Some alg
+            let m_alg = mm.iter().find(|m| m.alg.is_some());
+            let curr_alg = match m_alg {
+                Some(m) => match m.alg.clone() {
+                    Some(a) => a,
+                    None => unreachable!("already verified to be Some"),
+                },
                 None => match &self.alg {
                     Some(a) => a.to_owned(),
                     None => "sha256".to_string(),
                 },
             };
 
+            // create the initHash only once
             let exclusions = bmff_to_jumbf_exclusions(
                 &mut init_stream,
                 &self.exclusions,
                 self.bmff_version > 1,
             )?;
-
             init_stream.rewind()?;
             let hash = hash_stream_by_alg(&curr_alg, &mut init_stream, Some(exclusions), true)?;
 
-            mpd_mm.init_hash = Some(ByteBuf::from(hash));
+            // set it on all MerkleMap's
+            for mpd_mm in mm.iter_mut() {
+                mpd_mm.init_hash = Some(ByteBuf::from(hash.clone()));
+            }
 
             Ok(())
         } else {
@@ -984,11 +992,10 @@ impl BmffHash {
         local_id: u32,
         unique_id: Option<u32>,
     ) -> crate::Result<()> {
-        use crate::utils;
-
         // set Merkle hash to be the Root of the Merkle Tree
         // (number of proofs needed = Merkle Tree height - 1)
         let max_proofs: usize = (fragment_paths.len() as f32).log2().ceil() as usize;
+        let unique_id = unique_id.unwrap_or(local_id);
 
         // create output dir, if it doesn't exist
         let output_dir = output_file
@@ -1003,35 +1010,39 @@ impl BmffHash {
             }
         }
 
-        let unique_id = match unique_id {
-            Some(id) => id,
-            None => local_id,
-        };
-
         // if a signed version of fragment doesn't already exists
         // copy to output folder saving its path to fragments
         // if it does exist save output path to fragments
         let mut fragments = Vec::new();
         for file_path in fragment_paths {
-            match utils::live::signed_output(file_path, &output_file.to_path_buf())? {
-                Some(out) => {
-                    fragments.push(out);
-                }
-                None => {
-                    fragments.push(file_path.to_path_buf());
+            // TODO add this back in when its working again and trying to optimize it again
+            // match crate::utils::live::signed_output(file_path, &output_file.to_path_buf())? {
+            //     Some(out) => {
+            //         fragments.push(out);
+            //     }
+            //     None => {
+            //         fragments.push(file_path.to_path_buf());
 
-                    let output_path = output_dir.join(
-                        file_path
-                            .file_name()
-                            .ok_or(Error::BadParam("file name not found".to_string()))?,
-                    );
-                    std::fs::copy(file_path, output_path)?;
-                }
-            }
+            //         let output_path = output_dir.join(
+            //             file_path
+            //                 .file_name()
+            //                 .ok_or(Error::BadParam("file name not found".to_string()))?,
+            //         );
+            //         std::fs::copy(file_path, output_path)?;
+            //     }
+            // }
+            fragments.push(file_path.to_path_buf());
+
+            let output_path = output_dir.join(
+                file_path
+                    .file_name()
+                    .ok_or(Error::BadParam("file name not found".to_string()))?,
+            );
+            std::fs::copy(file_path, output_path)?;
         }
 
         // copy init file to output if it doesn't already exist
-        if utils::live::signed_output(asset_path, output_file)?.is_none() {
+        if crate::utils::live::signed_output(asset_path, output_file)?.is_none() {
             let output_path = output_dir.join(
                 asset_path
                     .file_name()
@@ -1071,61 +1082,60 @@ impl BmffHash {
                     .ok_or(Error::BadParam("file name not found".to_string()))?,
             );
 
-            // only insert a placeholder box in the new fragment
-            if c2pa_boxes.bmff_merkle.is_empty() {
-                let mut mm = BmffMerkleMap {
-                    unique_id,
-                    local_id,
-                    location: location as u32,
-                    hashes: None,
-                };
+            // TODO better to check if proofs change then update uuid in existing segment (before hashing)
+            // replace the UUID because it likely changes in size,
+            // because a new proof hash might be added
+            // (BMFF Box location is important for hashing)
+            let mut mm = BmffMerkleMap {
+                unique_id,
+                local_id,
+                location: location as u32,
+                hashes: None,
+            };
 
-                // fill proof hashes with dummy hashes
-                let proof = dummy_tree.get_proof_by_index(location, max_proofs)?;
-                if !proof.is_empty() {
-                    let mut proof_vec = Vec::new();
-                    for v in proof {
-                        let bb = ByteBuf::from(v);
-                        proof_vec.push(bb);
-                    }
-                    mm.hashes = Some(VecByteBuf(proof_vec));
+            // fill proof hashes with dummy hashes
+            let proof = dummy_tree.get_proof_by_index(location, max_proofs)?;
+            if !proof.is_empty() {
+                let mut proof_vec = Vec::new();
+                for v in proof {
+                    let bb = ByteBuf::from(v);
+                    proof_vec.push(bb);
                 }
-
-                // serialize Merkle Map
-                let mm_cbor = serde_cbor::to_vec(&mm)
-                    .map_err(|err| Error::AssertionEncoding(err.to_string()))?;
-
-                // generate the UUID box
-                let mut uuid_box_data: Vec<u8> = Vec::with_capacity(mm_cbor.len() * 2);
-                crate::asset_handlers::bmff_io::write_c2pa_box(
-                    &mut uuid_box_data,
-                    &[],
-                    false,
-                    &mm_cbor,
-                )?;
-
-                // insert uuid box before moof box
-                let first_moof = box_infos
-                    .iter()
-                    .find(|b| b.path == "moof")
-                    .ok_or(Error::BadParam("expected 1 moof in fragment".to_string()))?;
-
-                let mut source = std::fs::File::open(seg)?;
-                let mut dest = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(dest_path.clone())?;
-
-                // UUID to insert into output asset
-                crate::utils::io_utils::insert_data_at(
-                    &mut source,
-                    &mut dest,
-                    first_moof.offset,
-                    &uuid_box_data,
-                )?;
+                mm.hashes = Some(VecByteBuf(proof_vec));
             }
 
+            // serialize Merkle Map
+            let mm_cbor =
+                serde_cbor::to_vec(&mm).map_err(|err| Error::AssertionEncoding(err.to_string()))?;
+
+            // generate the UUID box
+            let mut uuid_box_data: Vec<u8> = Vec::with_capacity(mm_cbor.len() * 2);
+            crate::asset_handlers::bmff_io::write_c2pa_box(
+                &mut uuid_box_data,
+                &[],
+                false,
+                &mm_cbor,
+            )?;
+
+            // insert uuid box before moof box
+            let first_moof = box_infos
+                .iter()
+                .find(|b| b.path == "moof")
+                .ok_or(Error::BadParam("expected 1 moof in fragment".to_string()))?;
+
+            let mut source = std::fs::File::open(seg)?;
+            let mut dest = std::fs::OpenOptions::new().write(true).open(&dest_path)?;
+
+            // UUID to insert into output asset
+            crate::utils::io_utils::insert_data_at(
+                &mut source,
+                &mut dest,
+                first_moof.offset,
+                &uuid_box_data,
+            )?;
+
             // save file path for each which location in Merkle tree
-            location_to_fragment_map.insert(location as u32, dest_path.clone());
+            location_to_fragment_map.insert(location as u32, dest_path);
         }
 
         // fill in actual hashes now that we have inserted the C2PA box.
@@ -1197,7 +1207,7 @@ impl BmffHash {
                 )?;
 
                 // replace temp C2PA Merkle box
-                utils::live::replace_c2pa_box(
+                crate::utils::live::replace_c2pa_box(
                     &mut fragment_stream,
                     &uuid_box_data,
                     Some(bmff_mm_info.offset),
@@ -1206,8 +1216,7 @@ impl BmffHash {
         }
 
         // save desired Merkle tree row (here the root)
-        let tree_row = max_proofs;
-        let merkle_row = m_tree.layers[tree_row].clone();
+        let merkle_row = m_tree.layers[max_proofs].clone();
         let mut hashes = Vec::new();
         for mn in merkle_row {
             let bb = ByteBuf::from(mn.0);
@@ -1239,10 +1248,10 @@ impl BmffHash {
                     return Ok(());
                 }
             }
-            // otherwise apend
+            // otherwise append
             merkle.push(mm);
         } else {
-            // initialisation
+            // initialisation, the first Merkle Tree
             self.merkle = Some(vec![mm]);
         }
 

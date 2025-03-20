@@ -1061,6 +1061,7 @@ impl Builder {
             fragment_paths,
             output_path.as_ref(),
             signer,
+            0,
         )
     }
 
@@ -1096,23 +1097,14 @@ impl Builder {
     pub fn sign_live_bmff<P>(
         &mut self,
         signer: &dyn Signer,
-        init_file: P,
-        fragment_paths: &[std::path::PathBuf],
+        asset_path: P,
+        fragment_paths: &Vec<std::path::PathBuf>,
         output_path: P,
         window_size: usize,
     ) -> Result<()>
     where
         P: AsRef<Path>,
     {
-        if window_size == 0 {
-            return self.sign_fragmented_files(
-                signer,
-                init_file,
-                &fragment_paths.to_vec(),
-                output_path,
-            );
-        }
-
         // ugly hack to skip the error of already existing output from
         // `set_asset_from_dest`
         let path = output_path.as_ref();
@@ -1134,11 +1126,12 @@ impl Builder {
         // convert the manifest to a store
         let mut store = self.to_store()?;
 
-        store.save_to_live_bmff(
-            signer,
-            init_file.as_ref(),
+        // sign and write our store to DASH content
+        store.save_to_bmff_fragmented(
+            asset_path.as_ref(),
             fragment_paths,
             output_path.as_ref(),
+            signer,
             window_size,
         )
     }

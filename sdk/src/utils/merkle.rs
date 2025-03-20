@@ -22,6 +22,7 @@ pub struct MerkleNode(pub Vec<u8>);
 // Implements Merkle tree support corresponding to the C2PA spec variant.  The Merkle tree is not reduced and
 // all leaves live at the bottom most level.  If the last layer node is an odd index (lacking a matching pair),
 // its node value is propagated to parent layer, no cloning or hashing is expected.  Null tree entries do not contribute to the hashes.
+#[derive(Debug)]
 pub struct C2PAMerkleTree {
     pub leaves: Vec<MerkleNode>,
     pub layers: Vec<Vec<MerkleNode>>,
