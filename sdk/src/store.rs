@@ -2124,16 +2124,11 @@ impl Store {
         let mut bmff_hash = None;
         if let Ok(reader) = crate::Reader::from_stream("m4s", &asset_stream) {
             if let Some(manifest) = reader.active_manifest() {
-                for assertion in manifest.assertions() {
-                    if assertion
-                        .label()
-                        .starts_with(crate::assertions::labels::BMFF_HASH)
-                    {
-                        let mut b: BmffHash = assertion.to_assertion()?;
-                        // set version to 2, because serializing skips this and inits it to 0
-                        b.set_bmff_version(2);
-                        bmff_hash = Some(b);
-                    }
+                if let Ok(mut b) =
+                    manifest.find_assertion::<BmffHash>(crate::assertions::labels::BMFF_HASH_2)
+                {
+                    b.set_bmff_version(2);
+                    bmff_hash = Some(b);
                 }
             }
         }
