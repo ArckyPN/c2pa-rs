@@ -128,7 +128,7 @@ pub use validation_results::{ValidationResults, ValidationState};
 
 // Internal modules
 pub(crate) mod assertion;
-pub(crate) mod asset_handlers;
+pub mod asset_handlers;
 pub(crate) mod asset_io;
 pub(crate) mod builder;
 pub(crate) mod callback_signer;
@@ -156,5 +156,5 @@ pub(crate) mod salt;
 pub(crate) mod signer;
 pub(crate) mod store;
 
-pub(crate) mod utils;
+pub mod utils;
 pub(crate) use utils::{cbor_types, hash_utils};

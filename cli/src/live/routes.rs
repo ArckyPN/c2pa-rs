@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 
-use rocket::{http::Status, Data, State};
+use rocket::{http::Status, serde::json::Json, Data, State};
 
 use super::{
+    merkle_tree::MerkleTree,
     utility::{is_fragment, is_init, process_request_body},
     LiveSigner,
 };
@@ -65,4 +66,23 @@ pub(crate) async fn delete_ingest(
     })?;
 
     Ok(())
+}
+
+#[rocket::get("/merkle-tree/<name>/<uri..>")]
+pub(crate) async fn _get_merkle_tree(
+    name: &str,
+    uri: PathBuf,
+    state: &State<LiveSigner>,
+) -> Result<Json<MerkleTree>> {
+    let info = state.regex.uri(&uri).map_err(|err| {
+        log::error!("get MerkleTree for {uri:?}: {err}");
+        Status::InternalServerError
+    })?;
+
+    let tree = MerkleTree::_new(name, info, &state.media, state.window_size).map_err(|err| {
+        log::error!("get MerkleTree for {uri:?}: {err}");
+        Status::InternalServerError
+    })?;
+
+    Ok(Json(tree))
 }

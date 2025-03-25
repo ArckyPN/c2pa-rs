@@ -1111,7 +1111,7 @@ fn get_uuid_token(
 
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) struct C2PABmffBoxes {
+pub struct C2PABmffBoxes {
     pub manifest_bytes: Option<Vec<u8>>,
     pub bmff_merkle: Vec<BmffMerkleMap>,
     pub bmff_merkle_box_infos: Vec<BoxInfoLite>,
@@ -1119,7 +1119,7 @@ pub(crate) struct C2PABmffBoxes {
     pub xmp: Option<String>,
 }
 
-pub(crate) fn read_bmff_c2pa_boxes(mut reader: &mut dyn CAIRead) -> Result<C2PABmffBoxes> {
+pub fn read_bmff_c2pa_boxes(mut reader: &mut dyn CAIRead) -> Result<C2PABmffBoxes> {
     let size = stream_len(reader)?;
     reader.rewind()?;
 

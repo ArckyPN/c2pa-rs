@@ -12,6 +12,7 @@ use url::Url;
 use utility::{is_fragment, is_init};
 
 pub(crate) mod c2pa_builder;
+pub(crate) mod merkle_tree;
 pub(crate) mod regexp;
 pub(crate) mod routes;
 pub(crate) mod utility;

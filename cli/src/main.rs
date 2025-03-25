@@ -644,11 +644,21 @@ fn main() -> Result<()> {
                     ..Default::default()
                 };
 
+                let cors = rocket_cors::CorsOptions::default()
+                    .allowed_origins(rocket_cors::AllowedOrigins::all())
+                    .allowed_methods(std::collections::HashSet::from(
+                        [rocket::http::Method::Get].map(rocket_cors::Method::from),
+                    ))
+                    .allow_credentials(true)
+                    .to_cors()
+                    .expect("failed to create cors");
+
                 let rocket = rocket::custom(rocket_config)
                     .mount(
                         "/ingest",
                         rocket::routes![live::routes::post_ingest, live::routes::delete_ingest],
                     )
+                    // .mount("/", rocket::routes![live::routes::get_merkle_tree])
                     .manage(live::LiveSigner {
                         media: output.clone(),
                         target: target.to_owned(),
@@ -667,7 +677,8 @@ fn main() -> Result<()> {
                                 log::error!("failed to clean up media: {err}");
                             }
                         })
-                    }));
+                    }))
+                    .attach(cors);
                 rocket::execute(rocket.launch())?;
             } else {
                 if ext_normal(&output) != ext_normal(&args.path) {

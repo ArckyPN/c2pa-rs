@@ -45,7 +45,8 @@ url = "2.5.0"
 
 # Live
 regex = "1.11.1"
-rocket = "0.5.1"
+rocket = { version = "0.5.1", features = ["json"] }
+rocket_cors = "0.6.0"
 
 [dev-dependencies]
 assert_cmd = "2.0.14"

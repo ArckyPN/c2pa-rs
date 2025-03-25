@@ -1,0 +1,40 @@
+{
+    "alg": "es256",
+    "private_key": "benchmarks/src/signer/es256_private.key",
+    "sign_cert": "benchmarks/src/signer/es256_certs.pem",
+    "claim_version": 1,
+    "ta_url": "http://timestamp.digicert.com",
+    "claim_generator": "FAME Live Signer",
+    "title": "C2PA Live Stream",
+    "assertions": [
+        {
+            "label": "c2pa.actions",
+            "data": {
+                "actions": [
+                    {
+                        "action": "c2pa.created"
+                    },
+                    {
+                        "action": "c2pa.converted"
+                    },
+                    {
+                        "action": "c2pa.published"
+                    }
+                ]
+            }
+        },
+        {
+            "label": "stds.schema-org.CreativeWork",
+            "data": {
+                "@context": "https://schema.org",
+                "@type": "CreativeWork",
+                "author": [
+                    {
+                        "@type": "Person",
+                        "name": "FAME"
+                    }
+                ]
+            }
+        }
+    ]
+}
