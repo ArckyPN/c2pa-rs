@@ -44,6 +44,9 @@ pub const BOX_HASH: &str = "c2pa.hash.boxes";
 /// See <https://c2pa.org/specifications/specifications/1.0/specs/C2PA_Specification.html#_bmff_based_hash>.
 pub const BMFF_HASH: &str = "c2pa.hash.bmff";
 
+/// Version 2 of [BMFF_HASH]
+pub const BMFF_HASH_2: &str = "c2pa.hash.bmff.v2";
+
 /// Label prefix for a soft binding assertion.
 ///
 /// See <https://c2pa.org/specifications/specifications/1.0/specs/C2PA_Specification.html#_soft_binding_2>.
