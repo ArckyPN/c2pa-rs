@@ -44,6 +44,12 @@ reqwest = { version = "0.12.4", features = ["blocking"] }
 url = "2.5.0"
 
 # Live
+bytes = "1.10.1"
+chrono = "0.4.40"
+dashmap = "6.1.0"
+dash-mpd = { version = "0.18.2", path = "../../dash-mpd-rs" }
+itertools = "0.8.0"
+m3u8-rs = { version = "6.0.0", path = "../../m3u8-rs"}
 regex = "1.11.1"
 rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"

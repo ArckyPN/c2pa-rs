@@ -10,6 +10,21 @@ use super::{
 
 pub(super) type Result<T> = core::result::Result<T, Status>;
 
+macro_rules! log_err {
+    ($fn:expr, $name:expr) => {
+        $fn.map_err(|err| {
+            log::error!("{}: {err}", $name);
+            Status::InternalServerError
+        })
+    };
+    ($fn:expr, $name:expr, $err:expr) => {
+        $fn.map_err(|err| {
+            log::error!("{}: {err}", $name);
+            $err
+        })
+    };
+}
+
 #[rocket::post("/<name>/<uri..>", data = "<body>")]
 pub(crate) async fn post_ingest(
     name: &str,
@@ -19,34 +34,64 @@ pub(crate) async fn post_ingest(
 ) -> Result<()> {
     let local = state.local_path(name, &uri);
 
-    let buf = process_request_body(body, local).await.map_err(|err| {
-        log::error!("processing request body: {err}");
-        Status::InternalServerError
-    })?;
+    // read body and save to local disk
+
+    let buf = log_err!(
+        process_request_body(body, local).await,
+        "process request body"
+    )?;
+
+    // forward everything unchanged
+    let url = log_err!(state.cdn_url(name, &uri, None), "cdn url <None>")?;
+    log_err!(state.post(url, Some(buf.clone())).await, "post OG content")?;
 
     if !is_fragment(&uri) {
-        let target = state.cdn_url(name, &uri).map_err(|err| {
-            log::error!("building CDN URL: {err}");
-            Status::InternalServerError
-        })?;
+        // ! MPD / Server Approach code
+        /* if state.cache.has_manifests().await {
+            return Ok(());
+        }
+        // cache baseline Manifests to expand by hand
+        let manifest_url = log_err!(
+            state.cdn_url(name, &uri, Some(ForwardType::Manifest)),
+            "cdn url <Manifest>"
+        )?;
 
-        // forward non-fragment (mpd/playlists) without alterations
-        state.post(target, Some(buf)).await.map_err(|err| {
-            log::error!("forwarding {name}/{} to CDN: {err}", uri.display());
-            Status::InternalServerError
-        })?;
+        let UriInfo { rep_id, index } = log_err!(
+            state.regex.manifest(manifest_url.as_str()),
+            "regex manifest"
+        )?;
+
+        match index {
+            FragmentIndex::Manifest(ManifestTypes::Mpd) => {
+                let mpd = log_err!(dash_mpd::parse(&String::from_utf8_lossy(&buf)), "parse MPD")?;
+
+                if state.cache.num_reps().await == mpd_num_reps(&mpd) {
+                    state.cache.set_mpd(mpd, manifest_url).await;
+                }
+            }
+            FragmentIndex::Manifest(ManifestTypes::Media) => {
+                let mut media = log_err!(
+                    m3u8_rs::parse_media_playlist_res(&buf),
+                    "parse MediaPlaylist"
+                )?;
+                // remove unknown because it incorrectly parses program time
+                media.segments[0].unknown_tags.clear();
+
+                state.cache.insert_media(rep_id, media, manifest_url);
+            }
+            _ => {}
+        } */
         return Ok(());
     }
 
     if is_init(&uri) {
-        // skip init, need at least one fragment to continue to signing
+        // ! MPD / Server Approach code
+        /* state.cache.add_rep().await; */
+        // skip init, need at least one fragment for signing
         return Ok(());
     }
 
-    state.sign(name, uri).map_err(|err| {
-        log::error!("signing fragment: {err}");
-        Status::InternalServerError
-    })
+    log_err!(state.sign(name, uri).await, "signing fragment")
 }
 
 #[rocket::delete("/<name>/<uri..>")]
@@ -55,15 +100,9 @@ pub(crate) async fn delete_ingest(
     uri: PathBuf,
     state: &State<LiveSigner>,
 ) -> Result<()> {
-    let target = state.cdn_url(name, &uri).map_err(|err| {
-        log::error!("building CDN URL: {err}");
-        Status::InternalServerError
-    })?;
+    let target = log_err!(state.cdn_url(name, &uri, None), "cdn url <None>")?;
 
-    state.delete(target).await.map_err(|err| {
-        log::error!("deleting {name}/{} on CDN: {err}", uri.display());
-        Status::InternalServerError
-    })?;
+    log_err!(state.delete(target).await, "forward delete")?;
 
     Ok(())
 }
@@ -74,15 +113,12 @@ pub(crate) async fn _get_merkle_tree(
     uri: PathBuf,
     state: &State<LiveSigner>,
 ) -> Result<Json<MerkleTree>> {
-    let info = state.regex.uri(&uri).map_err(|err| {
-        log::error!("get MerkleTree for {uri:?}: {err}");
-        Status::InternalServerError
-    })?;
+    let info = log_err!(state.regex.uri(&uri), "regex uri")?;
 
-    let tree = MerkleTree::_new(name, info, &state.media, state.window_size).map_err(|err| {
-        log::error!("get MerkleTree for {uri:?}: {err}");
-        Status::InternalServerError
-    })?;
+    let tree = log_err!(
+        MerkleTree::_new(name, info, &state.media, state.window_size),
+        "new MerkleTree"
+    )?;
 
     Ok(Json(tree))
 }

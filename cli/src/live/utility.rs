@@ -3,7 +3,8 @@ use std::{
     path::Path,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
+use bytes::{Buf, Bytes};
 use rocket::{
     data::ByteUnit,
     tokio::{
@@ -119,5 +120,145 @@ where
             None => false,
         },
         None => false,
+    }
+}
+
+pub(crate) fn extract_c2pa_box<P>(path: P) -> Result<Vec<u8>>
+where
+    P: AsRef<Path>,
+{
+    let buf = std::fs::read(&path)?;
+    let mut buf = Bytes::copy_from_slice(&buf);
+    let mut c2pa = None;
+
+    loop {
+        let size = buf.get_u32();
+        let name = buf.copy_to_bytes(4);
+
+        let (size, hdr) = match size {
+            1 => (buf.get_u64(), 8),
+            _ => (size as u64, 4),
+        };
+
+        let payload_size = size as usize - hdr - 4;
+
+        if *name == *b"uuid" {
+            // FIXME ideally handle large size as well but unlikely to happen
+            let mut size = (size as u32).to_be_bytes().to_vec();
+            let mut name = name.to_vec();
+            let mut payload = buf.copy_to_bytes(payload_size).to_vec();
+
+            size.append(&mut name);
+            size.append(&mut payload);
+            c2pa.replace(size);
+            break;
+        }
+
+        buf.advance(payload_size);
+    }
+
+    if let Some(c2pa) = c2pa {
+        Ok(c2pa)
+    } else {
+        bail!("missing c2pa box in {:?}", path.as_ref())
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn replace_uuid_content<P>(path: P, new_content: &[u8]) -> Result<Vec<u8>>
+where
+    P: AsRef<Path>,
+{
+    let buf = std::fs::read(&path)?;
+    let mut buf = Bytes::copy_from_slice(&buf);
+
+    let mut vec = Vec::new();
+    while buf.has_remaining() {
+        let size = buf.get_u32();
+        let name = buf.copy_to_bytes(4);
+
+        if size == 1 {
+            unimplemented!("large boxes")
+        }
+
+        let payload_size = size as usize - 8;
+
+        if *name == *b"uuid" {
+            let new_len = new_content.len() as u32 + 8;
+
+            vec.append(&mut new_len.to_be_bytes().to_vec());
+            vec.append(&mut name.into());
+            vec.append(&mut new_content.to_vec());
+
+            buf.advance(payload_size);
+        } else {
+            vec.append(&mut size.to_be_bytes().to_vec());
+            vec.append(&mut name.into());
+            vec.append(&mut buf.copy_to_bytes(payload_size).into());
+        }
+    }
+
+    Ok(vec)
+}
+
+#[allow(dead_code)]
+pub(crate) fn mpd_num_reps(mpd: &dash_mpd::MPD) -> usize {
+    let mut num = 0;
+
+    for period in &mpd.periods {
+        for adaptation in &period.adaptations {
+            num += adaptation.representations.len();
+        }
+    }
+
+    num
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    /// test for only normal box sizes
+    fn replace_uuid_content_normal() {
+        let path = "/tmp/c2pa_data";
+        let og = [
+            28_u32.to_be_bytes().to_vec(),
+            b"ftyp".to_vec(),
+            b"this is some content".to_vec(),
+            33_u32.to_be_bytes().to_vec(),
+            b"uuid".to_vec(),
+            b"the original uuid content".to_vec(),
+            31_u32.to_be_bytes().to_vec(),
+            b"mdat".to_vec(),
+            b"here we some media data".to_vec(),
+        ]
+        .concat();
+
+        let exp = [
+            28_u32.to_be_bytes().to_vec(),
+            b"ftyp".to_vec(),
+            b"this is some content".to_vec(),
+            56_u32.to_be_bytes().to_vec(),
+            b"uuid".to_vec(),
+            b"http://localhost:5000/c2pa/bbb/0/source_init.m4s".to_vec(),
+            31_u32.to_be_bytes().to_vec(),
+            b"mdat".to_vec(),
+            b"here we some media data".to_vec(),
+        ]
+        .concat();
+
+        std::fs::write(path, &og).unwrap();
+
+        let rep = super::replace_uuid_content(
+            path,
+            "http://localhost:5000/c2pa/bbb/0/source_init.m4s".as_bytes(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            exp, rep,
+            "replace uuid box does not work for non large header"
+        );
+
+        std::fs::remove_file(path).unwrap();
     }
 }

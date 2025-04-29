@@ -641,6 +641,7 @@ fn main() -> Result<()> {
                 let rocket_config = rocket::Config {
                     address: bind.ip(),
                     port: bind.port(),
+                    log_level: rocket::config::LogLevel::Critical,
                     ..Default::default()
                 };
 
@@ -653,6 +654,7 @@ fn main() -> Result<()> {
                     .to_cors()
                     .expect("failed to create cors");
 
+                let re = Arc::new(live::regexp::Regexp::default());
                 let rocket = rocket::custom(rocket_config)
                     .mount(
                         "/ingest",
@@ -668,8 +670,10 @@ fn main() -> Result<()> {
                             manifest_json: json,
                             base_path: base_path.expect("missing base path"),
                         },
-                        regex: Arc::new(live::regexp::Regexp::default()),
+                        regex: re.clone(),
                         window_size: *window_size,
+                        // ! MPD / Server Approach code
+                        /* cache: Arc::new(ManifestCache::new(re)), */
                     })
                     .attach(rocket::fairing::AdHoc::on_shutdown("media cleaner", |_| {
                         Box::pin(async move {

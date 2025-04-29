@@ -1,5 +1,6 @@
 use std::{
     cmp::Ordering,
+    fmt::Display,
     iter::FromIterator,
     path::{Path, PathBuf},
     sync::Arc,
@@ -12,6 +13,7 @@ use url::Url;
 use utility::{is_fragment, is_init};
 
 pub(crate) mod c2pa_builder;
+pub(crate) mod manifest_signer;
 pub(crate) mod merkle_tree;
 pub(crate) mod regexp;
 pub(crate) mod routes;
@@ -19,6 +21,39 @@ pub(crate) mod utility;
 
 use c2pa_builder::C2PABuilder;
 use regexp::{Regexp, UriInfo};
+
+/// FFmpeg -window_size argument
+///
+/// TODO ideally set programmatically, i.e. CLI or ENV
+pub(super) const SEGMENT_LIST_NUM: usize = 5;
+
+// ! MPD / Server Approach code
+/* macro_rules! run_async {
+    ($block:tt) => {
+        rocket::futures::executor::block_on(async { $block })
+    };
+    ($call:stmt) => {
+        run_async!({ $call })
+    };
+} */
+
+#[allow(dead_code)]
+pub(crate) enum ForwardType {
+    Manifest,
+    Separate,
+    Signed,
+}
+
+impl Display for ForwardType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ForwardType::Manifest => "manifest",
+            ForwardType::Separate => "separate",
+            ForwardType::Signed => "signed",
+        };
+        f.write_str(s)
+    }
+}
 
 pub(crate) struct LiveSigner {
     /// local directory where to save the stream to
@@ -41,6 +76,8 @@ pub(crate) struct LiveSigner {
 
     /// Merkle Tree group size
     pub window_size: usize,
+    // ! MPD / Server Approach code
+    /* pub cache: Arc<ManifestCache>, */
 }
 
 impl LiveSigner {
@@ -54,16 +91,22 @@ impl LiveSigner {
         self.media.join(name).join(uri)
     }
 
-    /// creates the CDN URL from the ingest URI
+    /// creates the CDN URL for the given type `ty` of
+    /// [ForwardType]
     ///
-    /// `<target>/<name>/<uri..>`
-    pub fn cdn_url<P>(&self, name: &str, uri: P) -> Result<Url>
+    /// `<target>/<name>_<type>/<uri..>`
+    pub fn cdn_url<P>(&self, name: &str, uri: P, ty: Option<ForwardType>) -> Result<Url>
     where
         P: AsRef<Path>,
     {
         let uri = uri.as_ref().as_os_str().to_str().context("invalid uri")?;
 
-        Ok(self.target.join(&format!("{name}/{uri}"))?)
+        let uri = match ty {
+            Some(t) => format!("{name}_{t}/{uri}"),
+            None => format!("{name}/{uri}"),
+        };
+
+        Ok(self.target.join(&uri)?)
     }
 
     /// converts the given init file to its corresponding
@@ -121,7 +164,7 @@ impl LiveSigner {
     /// to the configured window_size
     ///
     /// returns Vec<(local path, forward URL)>
-    fn forward<P>(&self, name: &str, uri: P) -> Result<Vec<(PathBuf, Url)>>
+    fn forward<P>(&self, name: &str, uri: P, ty: Option<ForwardType>) -> Result<Vec<(PathBuf, Url)>>
     where
         P: AsRef<Path>,
     {
@@ -130,7 +173,7 @@ impl LiveSigner {
         for path in self.paths(name, uri)? {
             pairs.push((
                 self.path_to_signed_path(name, &path)?,
-                self.path_to_cdn_url(path)?,
+                self.path_to_cdn_url(path, name, &ty)?,
             ));
         }
 
@@ -153,12 +196,23 @@ impl LiveSigner {
             return Ok(pairs);
         }
 
-        // get the final group, which is being newly signed
-        let mut pairs = pairs[1..]
-            .chunks(self.window_size)
-            .last()
-            .context("missing fragments")?
-            .to_vec();
+        let mut pairs = match ty {
+            // get the fragments for SegmentList
+            Some(ForwardType::Manifest) => {
+                let cutoff = if pairs.len() < SEGMENT_LIST_NUM {
+                    1
+                } else {
+                    pairs.len() - SEGMENT_LIST_NUM
+                };
+                pairs.split_off(cutoff)
+            }
+            // get the final group, which is being newly signed
+            _ => pairs[1..]
+                .chunks(self.window_size)
+                .last()
+                .context("missing fragments")?
+                .to_vec(),
+        };
 
         pairs.push(init);
 
@@ -182,7 +236,7 @@ impl LiveSigner {
             .split("/")
             .map(|p| {
                 if p == name {
-                    format!("signed_{name}")
+                    format!("{name}_signed")
                 } else {
                     p.to_string()
                 }
@@ -193,7 +247,7 @@ impl LiveSigner {
     /// converts a local path to the corresponding CDN URL
     ///
     /// /path/to/media/<uri..> -> http://<target..>/<uri..>
-    fn path_to_cdn_url<P>(&self, path: P) -> Result<Url>
+    fn path_to_cdn_url<P>(&self, path: P, name: &str, ty: &Option<ForwardType>) -> Result<Url>
     where
         P: AsRef<Path>,
     {
@@ -202,8 +256,22 @@ impl LiveSigner {
             .strip_prefix(&self.media)?
             .to_str()
             .context("failed strip prefix")?;
+        let uri = match ty {
+            Some(t) => &uri.replace(name, &format!("{name}_{t}")),
+            None => uri,
+        };
         Ok(self.target.join(uri)?)
     }
+
+    // ! MPD / Server Approach code
+    /* fn separate_to_c2pa_url<U>(&self, forward: U) -> Result<Url>
+    where
+        U: IntoUrl,
+    {
+        let url = forward.as_str();
+        let url = url.replace("ingest", "c2pa").replace("_separate", "");
+        Ok(Url::parse(&url)?)
+    } */
 
     /// reads all paths associated with the same RepID
     fn paths<P>(&self, name: &str, uri: P) -> Result<Vec<PathBuf>>
@@ -254,19 +322,38 @@ impl LiveSigner {
         Ok(res)
     }
 
-    pub fn sign<P>(&self, name: &str, uri: P) -> Result<()>
+    // ! MPD / Server Approach code
+    /* fn forward_to_uuid_forward(&self, forward: &[(PathBuf, Url)]) -> Result<Vec<Url>> {
+        let mut vec = Vec::new();
+        for (_, url) in forward {
+            vec.push(self.separate_to_c2pa_url(url.clone())?);
+        }
+        Ok(vec)
+    } */
+
+    pub async fn sign<P>(&self, name: &str, uri: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
         let thread_name = format!("{name} - {:?}", uri.as_ref());
         let (init, fragments) = self.paths_to_sign(name, &uri)?;
         let output = self.output(name, &init)?;
-        let forward = self.forward(name, uri)?;
+        let signed_forward = self.forward(name, &uri, Some(ForwardType::Signed))?;
         let client = self.sync_client.clone();
         let window_size = self.window_size;
 
+        // ! MPD / Server Approach code
+        /* let separate_forward = self.forward(name, &uri, Some(ForwardType::Separate))?;
+        let manifest_forward = self
+            .forward(name, &uri, Some(ForwardType::Manifest))?
+            .iter()
+            .map(|f| f.0.clone())
+            .collect::<Vec<PathBuf>>();
+        let uuid_forward = self.forward_to_uuid_forward(&separate_forward)?;
+        let manifest_signer = self.cache.clone(); */
+
         ensure!(
-            forward.len() >= 2,
+            signed_forward.len() >= 2,
             "forward pairs must have at least two pairs, one init and one (or more) fragments"
         );
 
@@ -289,12 +376,44 @@ impl LiveSigner {
                     bail!("Sign: {err}")
                 }
 
-                for (path, url) in forward {
+                // forward signed fragments to signed
+                for (path, url) in signed_forward {
                     let buf = std::fs::read(path)?;
-
-                    // TODO chunked transfer?
                     client.post(url).body(buf).send()?;
                 }
+
+                // ! MPD / Server Approach code
+                /* // only cache the uuid boxes of the fragments that
+                // will be listed in the Manifests
+                if let Some((media, url)) = run_async!({
+                    let init = &manifest_forward[0];
+
+                    // reverse order to have the segment in chronological order
+                    let mut manifest_forward = manifest_forward[1..].to_vec();
+                    manifest_forward.reverse();
+
+                    manifest_signer
+                        .insert_segment_list(init, &manifest_forward)
+                        .await
+                })? {
+                    // forward MediaPlaylist
+                    client.post(url).body(media).send()?;
+                }
+
+                // forward MPD
+                if let Some((mpd, url)) = run_async!(manifest_signer.mpd_ready().await) {
+                    client.post(url).body(mpd).send()?;
+                }
+
+                // save separated UUID Boxes on server (here: also CDN for simplicity)
+                for ((path, url), c2pa_url) in separate_forward.into_iter().zip(uuid_forward) {
+                    let uuid = extract_c2pa_box(&path)?;
+                    // TODO write c2pa_url into manifests (like other approach instead of into uuid box) - this will save space by not having the life a third time
+                    let fragment = replace_uuid_content(path, c2pa_url.as_str().as_bytes())?;
+
+                    client.post(c2pa_url).body(uuid).send()?;
+                    client.post(url).body(fragment).send()?;
+                } */
 
                 Ok(())
             })?;

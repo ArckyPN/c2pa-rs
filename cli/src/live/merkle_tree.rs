@@ -26,7 +26,7 @@ impl MerkleTree {
     {
         let idx = match &info.index {
             FragmentIndex::Index(i) => i.to_owned() as usize,
-            FragmentIndex::Init => bail!("cannot build MerkleTree from init Segment"),
+            _ => bail!("cannot build MerkleTree from init Segment"),
         };
         let rep = info.rep_id;
 
