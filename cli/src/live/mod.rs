@@ -38,18 +38,21 @@ pub(super) const SEGMENT_LIST_NUM: usize = 5;
 } */
 
 #[allow(dead_code)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum ForwardType {
     Manifest,
     Separate,
     Signed,
+    RollingHash,
 }
 
 impl Display for ForwardType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = match self {
-            ForwardType::Manifest => "manifest",
-            ForwardType::Separate => "separate",
-            ForwardType::Signed => "signed",
+            Self::Manifest => "manifest",
+            Self::Separate => "separate",
+            Self::Signed => "signed",
+            Self::RollingHash => "rolling-hash",
         };
         f.write_str(s)
     }
@@ -84,10 +87,15 @@ impl LiveSigner {
     /// creates the local path from the ingest URI
     ///
     /// `<media>/<name>/<uri..>`
-    pub fn local_path<P>(&self, name: &str, uri: P) -> PathBuf
+    pub fn local_path<P>(&self, name: &str, uri: P, ty: Option<ForwardType>) -> PathBuf
     where
         P: AsRef<Path>,
     {
+        let name = match ty {
+            Some(ty) => format!("{name}_{ty}"),
+            None => name.to_owned(),
+        };
+
         self.media.join(name).join(uri)
     }
 
@@ -113,11 +121,11 @@ impl LiveSigner {
     /// output path
     ///
     /// `<media>/signed_<name>/`
-    fn output<P>(&self, name: &str, init: P) -> Result<PathBuf>
+    fn output<P>(&self, name: &str, init: P, ty: ForwardType) -> Result<PathBuf>
     where
         P: AsRef<Path>,
     {
-        self.path_to_signed_path(name, init)
+        self.path_to_signed_path(name, init, ty)
     }
 
     /// creates the output directory path of the original content
@@ -164,7 +172,7 @@ impl LiveSigner {
     /// to the configured window_size
     ///
     /// returns Vec<(local path, forward URL)>
-    fn forward<P>(&self, name: &str, uri: P, ty: Option<ForwardType>) -> Result<Vec<(PathBuf, Url)>>
+    fn forward<P>(&self, name: &str, uri: P, ty: ForwardType) -> Result<Vec<(PathBuf, Url)>>
     where
         P: AsRef<Path>,
     {
@@ -172,8 +180,8 @@ impl LiveSigner {
 
         for path in self.paths(name, uri)? {
             pairs.push((
-                self.path_to_signed_path(name, &path)?,
-                self.path_to_cdn_url(path, name, &ty)?,
+                self.path_to_signed_path(name, &path, ty)?,
+                self.path_to_cdn_url(path, name, &Some(ty))?,
             ));
         }
 
@@ -198,7 +206,7 @@ impl LiveSigner {
 
         let mut pairs = match ty {
             // get the fragments for SegmentList
-            Some(ForwardType::Manifest) => {
+            ForwardType::Manifest => {
                 let cutoff = if pairs.len() < SEGMENT_LIST_NUM {
                     1
                 } else {
@@ -224,8 +232,8 @@ impl LiveSigner {
 
     /// converts a local path to the corresponding signed file path
     ///
-    /// /path/to/media/<name>/<uri..> -> /path/to/media/signed_<name>/<uri..>
-    fn path_to_signed_path<P>(&self, name: &str, path: P) -> Result<PathBuf>
+    /// /path/to/media/<name>/<uri..> -> /path/to/media/<name>_<ty>/<uri..>
+    fn path_to_signed_path<P>(&self, name: &str, path: P, ty: ForwardType) -> Result<PathBuf>
     where
         P: AsRef<Path>,
     {
@@ -236,7 +244,7 @@ impl LiveSigner {
             .split("/")
             .map(|p| {
                 if p == name {
-                    format!("{name}_signed")
+                    format!("{name}_{ty}")
                 } else {
                     p.to_string()
                 }
@@ -331,17 +339,52 @@ impl LiveSigner {
         Ok(vec)
     } */
 
+    fn rolling_hash_input_paths<P>(&self, name: &str, uri: P) -> Result<(PathBuf, PathBuf)>
+    where
+        P: AsRef<Path>,
+    {
+        let init = self
+            .paths(name, &uri)?
+            .iter()
+            .find(|p| is_init(p))
+            .context("missing init file")?
+            .to_owned();
+
+        let fragment = self.local_path(name, uri, None);
+
+        Ok((init, fragment))
+    }
+
+    fn rolling_hash_forward_urls<P1, P2>(
+        &self,
+        name: &str,
+        init: P1,
+        fragment: P2,
+    ) -> Result<Vec<(PathBuf, Url)>>
+    where
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
+    {
+        let mut vec = Vec::new();
+
+        let fragment_url =
+            self.path_to_cdn_url(&fragment, name, &Some(ForwardType::RollingHash))?;
+        let fragment_path = self.path_to_signed_path(name, &fragment, ForwardType::RollingHash)?;
+
+        vec.push((fragment_path, fragment_url));
+
+        let init_url = self.path_to_cdn_url(&init, name, &Some(ForwardType::RollingHash))?;
+        let init_path = self.path_to_signed_path(name, &init, ForwardType::RollingHash)?;
+
+        vec.push((init_path, init_url));
+
+        Ok(vec)
+    }
+
     pub async fn sign<P>(&self, name: &str, uri: P) -> Result<()>
     where
         P: AsRef<Path>,
     {
-        let thread_name = format!("{name} - {:?}", uri.as_ref());
-        let (init, fragments) = self.paths_to_sign(name, &uri)?;
-        let output = self.output(name, &init)?;
-        let signed_forward = self.forward(name, &uri, Some(ForwardType::Signed))?;
-        let client = self.sync_client.clone();
-        let window_size = self.window_size;
-
         // ! MPD / Server Approach code
         /* let separate_forward = self.forward(name, &uri, Some(ForwardType::Separate))?;
         let manifest_forward = self
@@ -352,15 +395,48 @@ impl LiveSigner {
         let uuid_forward = self.forward_to_uuid_forward(&separate_forward)?;
         let manifest_signer = self.cache.clone(); */
 
-        ensure!(
-            signed_forward.len() >= 2,
-            "forward pairs must have at least two pairs, one init and one (or more) fragments"
-        );
+        // Rolling Hash signing
+
+        let UriInfo { rep_id, index: _ } = self.regex.uri(&uri)?;
 
         let builder = self.c2pa.clone();
-
+        let (init, fragment) = self.rolling_hash_input_paths(name, &uri)?;
+        let output_dir = self.local_path(name, rep_id.to_string(), Some(ForwardType::RollingHash));
+        let signed_forward = self.rolling_hash_forward_urls(name, &init, &fragment)?;
+        let client = self.sync_client.clone();
         thread::Builder::new()
-            .name(thread_name)
+            .name(format!("Rolling Hash {name} - {:?}", uri.as_ref()))
+            .spawn(move || -> Result<()> {
+                let signer = builder.signer()?;
+                let mut c2pa = builder.builder()?;
+
+                // sign
+                if let Err(err) =
+                    c2pa.sign_live_bmff_rolling_hash(signer.as_ref(), init, fragment, &output_dir)
+                {
+                    log::error!("Sign: {err}");
+                    bail!("Sign: {err}")
+                }
+
+                // forward signed fragments to signed
+                for (path, url) in signed_forward {
+                    let buf = std::fs::read(path)?;
+                    client.post(url).body(buf).send()?;
+                }
+
+                Ok(())
+            })?;
+
+        // Optimized Merkle Tree signing
+
+        let (init, fragments) = self.paths_to_sign(name, &uri)?;
+        let output = self.output(name, &init, ForwardType::Signed)?;
+        let signed_forward = self.forward(name, &uri, ForwardType::Signed)?;
+        let client = self.sync_client.clone();
+        let window_size = self.window_size;
+        let builder = self.c2pa.clone();
+        thread::Builder::new()
+            .name(format!("Merkle: {name} - {:?}", uri.as_ref()))
             .spawn(move || -> Result<()> {
                 let signer = builder.signer()?;
                 let mut c2pa = builder.builder()?;
@@ -369,6 +445,7 @@ impl LiveSigner {
                     clear_dir(&output)?;
                 }
 
+                // sign
                 if let Err(err) =
                     c2pa.sign_live_bmff(signer.as_ref(), init, &fragments, output, window_size)
                 {
@@ -378,6 +455,7 @@ impl LiveSigner {
 
                 // forward signed fragments to signed
                 for (path, url) in signed_forward {
+                    // println!("Merkle: {path:?} {}", path.exists());
                     let buf = std::fs::read(path)?;
                     client.post(url).body(buf).send()?;
                 }

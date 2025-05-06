@@ -1,6 +1,6 @@
 use std::{
     fs::{read_dir, remove_dir_all},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::{bail, Context, Result};
@@ -15,6 +15,22 @@ use rocket::{
 };
 
 const MAX_CHUNK_SIZE: usize = u16::MAX as usize;
+
+#[macro_export]
+macro_rules! log_err {
+    ($fn:expr, $name:expr) => {
+        $fn.map_err(|err| {
+            log::error!("{}: {err}", $name);
+            rocket::http::Status::InternalServerError
+        })
+    };
+    ($fn:expr, $name:expr, $err:expr) => {
+        $fn.map_err(|err| {
+            log::error!("{}: {err}", $name);
+            $err
+        })
+    };
+}
 
 /// cleans up all media created during runtime
 ///
@@ -162,6 +178,19 @@ where
     } else {
         bail!("missing c2pa box in {:?}", path.as_ref())
     }
+}
+
+pub(crate) fn find_init<P>(dir: P) -> Result<PathBuf>
+where
+    P: AsRef<Path>,
+{
+    for entry in dir.as_ref().read_dir()? {
+        let path = entry?.path();
+        if is_init(&path) {
+            return Ok(path);
+        }
+    }
+    bail!("could not find init")
 }
 
 #[allow(dead_code)]

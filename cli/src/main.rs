@@ -660,6 +660,10 @@ fn main() -> Result<()> {
                         "/ingest",
                         rocket::routes![live::routes::post_ingest, live::routes::delete_ingest],
                     )
+                    .mount(
+                        "/verify",
+                        rocket::routes![live::routes::verify_rolling_hash],
+                    )
                     // .mount("/", rocket::routes![live::routes::get_merkle_tree])
                     .manage(live::LiveSigner {
                         media: output.clone(),

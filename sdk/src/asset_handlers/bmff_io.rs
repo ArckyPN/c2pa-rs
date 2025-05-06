@@ -25,7 +25,7 @@ use conv::ValueFrom;
 use tempfile::Builder;
 
 use crate::{
-    assertions::{BmffMerkleMap, ExclusionsMap},
+    assertions::{BmffMerkleMap, ExclusionsMap, FragmentRollingHash},
     asset_io::{
         rename_or_move, AssetIO, AssetPatch, CAIRead, CAIReadWrite, CAIReader, CAIWriter,
         HashObjectPositions, RemoteRefEmbed, RemoteRefEmbedType,
@@ -254,7 +254,7 @@ pub(crate) struct BoxInfo {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct BoxInfoLite {
+pub struct BoxInfoLite {
     pub path: String,
     pub offset: u64,
     pub size: u64,
@@ -1247,6 +1247,148 @@ pub fn read_bmff_c2pa_boxes(mut reader: &mut dyn CAIRead) -> Result<C2PABmffBoxe
         box_infos,
         xmp,
     })
+}
+
+#[derive(Debug)]
+pub struct C2PABmffBoxesRollingHash {
+    pub manifest_bytes: Option<Vec<u8>>,
+    pub rolling_hashes: Vec<FragmentRollingHash>,
+    pub bmff_merkle_box_infos: Vec<BoxInfoLite>,
+    pub box_infos: Vec<BoxInfoLite>,
+    pub xmp: Option<String>,
+}
+
+impl C2PABmffBoxesRollingHash {
+    pub fn from_reader(mut reader: &mut dyn CAIRead) -> Result<Self> {
+        let size = stream_len(reader)?;
+        reader.rewind()?;
+
+        // create root node
+        let root_box = BoxInfo {
+            path: "".to_string(),
+            offset: 0,
+            size,
+            box_type: BoxType::Empty,
+            parent: None,
+            user_type: None,
+            version: None,
+            flags: None,
+        };
+
+        let (mut bmff_tree, root_token) = Arena::with_data(root_box);
+        let mut bmff_map = HashMap::new();
+
+        // build layout of the BMFF structure
+        build_bmff_tree(reader, size, &mut bmff_tree, &root_token, &mut bmff_map)?;
+
+        let mut manifest_bytes = None;
+        let mut xmp = None;
+        let mut _first_aux_uuid = 0;
+        let mut rolling_hashes = Vec::new();
+        let mut bmff_merkle_box_infos = Vec::new();
+
+        // grab top level (for now) C2PA box
+        if let Some(uuid_list) = bmff_map.get("/uuid") {
+            let mut manifest_store_cnt = 0;
+
+            for uuid_token in uuid_list {
+                let box_info = &bmff_tree[*uuid_token];
+
+                // make sure it is UUID box
+                if box_info.data.box_type == BoxType::UuidBox {
+                    if let Some(uuid) = &box_info.data.user_type {
+                        // make sure it is a C2PA ContentProvenanceBox box
+                        if vec_compare(&C2PA_UUID, uuid) {
+                            let mut data_len = box_info.data.size - HEADER_SIZE - 16 /*UUID*/;
+
+                            // set reader to start of box contents
+                            skip_bytes_to(reader, box_info.data.offset + HEADER_SIZE + 16)?;
+
+                            // Fullbox => 8 bits for version 24 bits for flags
+                            let (_version, _flags) = read_box_header_ext(reader)?;
+                            data_len -= 4;
+
+                            // get the purpose
+                            let mut purpose = Vec::with_capacity(64);
+                            loop {
+                                let mut buf = [0; 1];
+                                reader.read_exact(&mut buf)?;
+                                data_len -= 1;
+                                if buf[0] == 0x00 {
+                                    break;
+                                } else {
+                                    purpose.push(buf[0]);
+                                }
+                            }
+
+                            // is the purpose manifest?
+                            if vec_compare(&purpose, MANIFEST.as_bytes()) {
+                                // offset to first aux uuid with purpose merkle
+                                let mut buf = [0u8; 8];
+                                reader.read_exact(&mut buf)?;
+                                data_len -= 8;
+
+                                // offset to first aux uuid
+                                let offset = u64::from_be_bytes(buf);
+
+                                // read the manifest
+                                if manifest_store_cnt == 0 {
+                                    let manifest = reader.read_to_vec(data_len)?;
+                                    manifest_bytes = Some(manifest);
+
+                                    manifest_store_cnt += 1;
+                                } else {
+                                    return Err(Error::TooManyManifestStores);
+                                }
+
+                                // if contains offset this asset contains additional UUID boxes
+                                if offset != 0 {
+                                    _first_aux_uuid = offset;
+                                }
+                            } else if vec_compare(&purpose, MERKLE.as_bytes()) {
+                                let merkle = reader.read_to_vec(data_len)?;
+
+                                // use this method since it will strip trailing zeros padding if there
+                                let mut deserializer =
+                                    serde_cbor::de::Deserializer::from_slice(&merkle);
+                                let mm: FragmentRollingHash =
+                                    serde::Deserialize::deserialize(&mut deserializer)?;
+
+                                rolling_hashes.push(mm);
+                                bmff_merkle_box_infos.push(BoxInfoLite {
+                                    path: box_info.data.path.clone(),
+                                    offset: box_info.data.offset,
+                                    size: box_info.data.size,
+                                });
+                            }
+                        } else if vec_compare(&XMP_UUID, uuid) {
+                            let data_len = box_info.data.size - HEADER_SIZE - 16 /*UUID*/;
+
+                            // set reader to start of box contents
+                            skip_bytes_to(reader, box_info.data.offset + HEADER_SIZE + 16)?;
+
+                            let xmp_vec = reader.read_to_vec(data_len)?;
+                            if let Ok(xmp_string) = String::from_utf8(xmp_vec) {
+                                xmp = Some(xmp_string);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // get position ordered list of boxes
+        let mut box_infos: Vec<BoxInfoLite> = get_top_level_boxes(&bmff_tree, &bmff_map);
+        box_infos.sort_by(|a, b| a.offset.cmp(&b.offset));
+
+        Ok(Self {
+            manifest_bytes,
+            rolling_hashes,
+            bmff_merkle_box_infos,
+            box_infos,
+            xmp,
+        })
+    }
 }
 
 impl CAIReader for BmffIO {

@@ -35,7 +35,8 @@ use crate::{
     assertions::{
         self,
         labels::{ACTIONS, BMFF_HASH},
-        Actions, AssetType, BmffHash, BoxHash, DataBox, DataHash, Metadata, V2_DEPRECATED_ACTIONS,
+        Actions, AssetType, BmffHash, BoxHash, DataBox, DataHash, Metadata, RollingHash,
+        V2_DEPRECATED_ACTIONS,
     },
     asset_io::CAIRead,
     cbor_types::map_cbor_to_type,
@@ -89,6 +90,10 @@ pub enum ClaimAssetData<'a> {
     StreamFragment(&'a mut dyn CAIRead, &'a mut dyn CAIRead, &'a str),
     #[cfg(feature = "file_io")]
     StreamFragments(&'a mut dyn CAIRead, &'a Vec<std::path::PathBuf>, &'a str),
+    /// validate a Rolling Hash Init File, Fragment with a Previous Hash from Memory
+    RollingHash(&'a mut dyn CAIRead, &'a mut dyn CAIRead, &'a str, &'a [u8]),
+    /// validate a Rolling Hash Fragment with a Previous Hash and Rolling Hash from Memory
+    RollingHashFragment(&'a mut dyn CAIRead, &'a str, &'a [u8], &'a [u8]),
 }
 
 #[derive(PartialEq, Debug, Eq, Clone)]
@@ -1612,6 +1617,10 @@ impl Claim {
         self.replace_assertion(bmff_hash.to_assertion()?)
     }
 
+    pub(crate) fn update_rolling_hash(&mut self, rolling_hash: RollingHash) -> Result<()> {
+        self.replace_assertion(rolling_hash.to_assertion()?)
+    }
+
     // Patch an existing assertion with new contents.
     //
     // `replace_with` should match in name and size of an existing assertion.
@@ -2045,6 +2054,7 @@ impl Claim {
                                 fragment_paths,
                                 Some(claim.alg()),
                             ),
+                        _ => return Err(Error::UnsupportedType),
                     };
 
                     match hash_result {
@@ -2146,6 +2156,76 @@ impl Claim {
                             )?;
                         }
                     }
+                } else if hash_binding_assertion.label_root() == RollingHash::LABEL {
+                    // handle RollingHash data hashes
+                    let dh = RollingHash::from_assertion(hash_binding_assertion)?;
+
+                    let name = dh.name().map_or("unnamed".to_string(), default_str);
+
+                    let hash_result = match asset_data {
+                        #[cfg(feature = "file_io")]
+                        ClaimAssetData::Path(asset_path) => {
+                            dh.verify_hash(asset_path, Some(claim.alg()))
+                        }
+                        ClaimAssetData::Bytes(asset_bytes, _) => {
+                            dh.verify_in_memory_hash(asset_bytes, Some(claim.alg()))
+                        }
+                        ClaimAssetData::Stream(stream_data, _) => {
+                            dh.verify_stream_hash(*stream_data, Some(claim.alg()))
+                        }
+                        ClaimAssetData::StreamFragment(init_data, fragment_data, _) => {
+                            dh.verify_stream_segment(*init_data, *fragment_data, Some(claim.alg()))
+                        }
+                        #[cfg(feature = "file_io")]
+                        ClaimAssetData::StreamFragments(init_data, fragments, _) => {
+                            dh.verify_stream_fragments(*init_data, fragments, Some(claim.alg()))
+                        }
+                        ClaimAssetData::RollingHash(init_data, fragment_data, _, previous_hash) => {
+                            dh.verify_fragment(
+                                *init_data,
+                                *fragment_data,
+                                Some(claim.alg()),
+                                previous_hash,
+                            )
+                        }
+                        ClaimAssetData::RollingHashFragment(
+                            fragment_data,
+                            _,
+                            rolling_hash,
+                            previous_hash,
+                        ) => dh.verify_fragment_memory(
+                            *fragment_data,
+                            Some(claim.alg()),
+                            rolling_hash,
+                            previous_hash,
+                        ),
+                    };
+
+                    match hash_result {
+                        Ok(_a) => {
+                            log_item!(
+                                claim.assertion_uri(&hash_binding_assertion.label()),
+                                "rolling hash valid",
+                                "verify_internal"
+                            )
+                            .validation_status(validation_status::ASSERTION_ROLLINGHASH_MATCH)
+                            .success(validation_log);
+
+                            continue;
+                        }
+                        Err(err) => {
+                            log_item!(
+                                claim.assertion_uri(&hash_binding_assertion.label()),
+                                format!("asset hash err, name: {name}, error{err}"),
+                                "verify_internal"
+                            )
+                            .validation_status(validation_status::ASSERTION_ROLLINGHASH_MISMATCH)
+                            .failure(
+                                validation_log,
+                                Error::HashMismatch(format!("Asset hash failure: {err}")),
+                            )?;
+                        }
+                    }
                 }
             }
         }
@@ -2181,6 +2261,12 @@ impl Claim {
         let dummy_box_hash = Assertion::new(assertions::labels::BOX_HASH, None, dummy_box_data);
         data_hashes.append(&mut self.assertions_by_type(&dummy_box_hash));
 
+        // add in RollingHash
+        let dummy_rolling_data = AssertionData::Cbor(Vec::new());
+        let dummy_rolling_hash =
+            Assertion::new(assertions::labels::ROLLING_HASH, None, dummy_rolling_data);
+        data_hashes.append(&mut self.assertions_by_type(&dummy_rolling_hash));
+
         data_hashes
     }
 
@@ -2189,6 +2275,12 @@ impl Claim {
         let dummy_bmff_data = AssertionData::Cbor(Vec::new());
         let dummy_bmff_hash = Assertion::new(assertions::labels::BMFF_HASH, None, dummy_bmff_data);
         self.assertions_by_type(&dummy_bmff_hash)
+    }
+
+    pub fn rolling_hash_assertions(&self) -> Vec<&Assertion> {
+        let dummy_data = AssertionData::Cbor(Vec::new());
+        let dummy_hash = Assertion::new(assertions::labels::ROLLING_HASH, None, dummy_data);
+        self.assertions_by_type(&dummy_hash)
     }
 
     pub fn box_hash_assertions(&self) -> Vec<&Assertion> {

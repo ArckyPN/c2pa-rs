@@ -1093,6 +1093,14 @@ impl Builder {
     ///
     /// # Errors
     /// * Returns an [`Error`] if the manifest cannot be signed.
+    #[async_generic(async_signature(
+        &mut self,
+        signer: &dyn AsyncSigner,
+        asset_path: P,
+        fragment_paths: &Vec<std::path::PathBuf>,
+        output_path: P,
+        window_size: usize,
+    ))]
     #[cfg(feature = "file_io")]
     pub fn sign_live_bmff<P>(
         &mut self,
@@ -1127,13 +1135,89 @@ impl Builder {
         let mut store = self.to_store()?;
 
         // sign and write our store to DASH content
-        store.save_to_bmff_fragmented(
-            asset_path.as_ref(),
-            fragment_paths,
-            output_path.as_ref(),
-            signer,
-            window_size,
-        )
+        if _sync {
+            store.save_to_bmff_fragmented(
+                asset_path.as_ref(),
+                fragment_paths,
+                output_path.as_ref(),
+                signer,
+                window_size,
+            )
+        } else {
+            store
+                .save_to_bmff_fragmented_async(
+                    asset_path.as_ref(),
+                    fragment_paths,
+                    output_path.as_ref(),
+                    signer,
+                    window_size,
+                )
+                .await
+        }
+    }
+
+    /// Sign a partially completed fragmented BMFF live stream.
+    ///
+    /// This will use a rolling hash for signing instead of
+    /// a Merkle Tree as VoD is using.
+    ///
+    /// # Arguments
+    /// * `signer` - The signer to use.
+    /// * `asset_path` - The path to the primary asset file, the
+    ///     init file. After the first fragment this file should
+    ///     have a C2PA manifest.
+    /// * `previous_fragment` - The path to the previous fragment
+    ///     of the live stream. Needed to continue the rolling
+    ///     hash.
+    /// * `new_fragment` - The path to the new fragment to be
+    ///     added to the rolling hash.
+    /// * `output_dir` - The path to the output signed files
+    ///     directory.
+    #[async_generic(async_signature(
+        &mut self,
+        signer: &dyn AsyncSigner,
+        asset_path: P1,
+        new_fragment: P2,
+        output_dir: P3,
+    ))]
+    #[cfg(feature = "file_io")]
+    pub fn sign_live_bmff_rolling_hash<P1, P2, P3>(
+        &mut self,
+        signer: &dyn Signer,
+        asset_path: P1,
+        new_fragment: P2,
+        output_dir: P3,
+    ) -> Result<()>
+    where
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
+        P3: AsRef<Path>,
+    {
+        // ugly hack to skip the error of already existing output from
+        // `set_asset_from_dest`
+        let path = output_dir.as_ref();
+        if !path.exists() {
+            std::fs::create_dir_all(&output_dir)?;
+        }
+        self.definition.format =
+            crate::format_from_path(&asset_path).ok_or(crate::Error::UnsupportedType)?;
+        self.definition.instance_id = format!("xmp:iid:{}", Uuid::new_v4());
+        if self.definition.title.is_none() {
+            if let Some(title) = path.file_name() {
+                self.definition.title = Some(title.to_string_lossy().to_string());
+            }
+        }
+
+        // convert the manifest to a store
+        let mut store = self.to_store()?;
+
+        if _sync {
+            store.save_to_bmff_rolling_hash(asset_path, new_fragment, output_dir, signer)
+        } else {
+            store
+                .save_to_bmff_rolling_hash_async(asset_path, new_fragment, output_dir, signer)
+                .await
+        }
     }
 
     #[cfg(feature = "file_io")]
@@ -1191,6 +1275,7 @@ mod tests {
     #[cfg(any(feature = "openssl_sign", target_arch = "wasm32"))]
     use crate::{assertions::BoxHash, asset_handlers::jpeg_io::JpegIO};
     use crate::{
+        assertions::RollingHash,
         hash_stream_by_alg,
         utils::{test::write_jpeg_placeholder_stream, test_signer::test_signer},
         validation_results::ValidationState,
@@ -1978,5 +2063,126 @@ mod tests {
         }
 
         // println!("{manifest_store}");
+    }
+
+    #[test]
+    fn rolling_hash() {
+        let base = "../benchmarks";
+
+        let init = format!("{base}/fragments/segment_init.m4s");
+        let signed_init = format!("{base}/signed/segment_init.m4s");
+        let output = format!("{base}/signed");
+        std::fs::remove_dir_all(&output).unwrap();
+
+        let signer = crate::utils::test_signer::test_signer(SigningAlg::Ed25519);
+        let mut builder = Builder::from_json(&manifest_json()).unwrap();
+        builder
+            .resources
+            .add("thumbnail.jpg", TEST_THUMBNAIL.to_vec())
+            .unwrap();
+
+        // sign all 100 fragments and keep track of the rolling hash
+        let mut rolling_hash = Vec::new();
+        for i in 1..=100 {
+            let frag = format!("{base}/fragments/segment_{i:09}.m4s");
+            let signed_frag = format!("{base}/signed/segment_{i:09}.m4s");
+
+            builder
+                .sign_live_bmff_rolling_hash(signer.as_ref(), &init, frag, &output)
+                .unwrap();
+
+            // validate fragment
+            let reader = if i == 1 {
+                let mut init_fp = std::fs::OpenOptions::new()
+                    .read(true)
+                    .open(&signed_init)
+                    .unwrap();
+                let mut frag1_fp = std::fs::OpenOptions::new()
+                    .read(true)
+                    .open(&signed_frag)
+                    .unwrap();
+
+                Reader::from_fragment("m4s", &mut init_fp, &mut frag1_fp).unwrap()
+            } else {
+                Reader::from_rolling_hash("m4s", &signed_init, &signed_frag, &rolling_hash).unwrap()
+            };
+
+            // check if all went well
+            assert!(
+                reader
+                    .validation_results()
+                    .unwrap()
+                    .active_manifest()
+                    .unwrap()
+                    .failure()
+                    .is_empty(),
+                "Fragment {i} is invalid: {reader:?}"
+            );
+
+            // override rolling hash for next iteration
+            rolling_hash = reader
+                .active_manifest()
+                .unwrap()
+                .find_assertion::<RollingHash>(crate::assertions::labels::ROLLING_HASH)
+                .unwrap()
+                .rolling_hash()
+                .cloned()
+                .unwrap();
+        }
+
+        // testing if memory validation works (for client hack)
+
+        // sign two fragments
+        for i in 1..=2 {
+            let frag = format!("{base}/fragments/segment_{i:09}.m4s");
+
+            builder
+                .sign_live_bmff_rolling_hash(signer.as_ref(), &init, frag, &output)
+                .unwrap();
+        }
+
+        // extract previous and rolling hash from init
+        let previous_frag = format!("{base}/signed/segment_{:09}.m4s", 1);
+        let mut init_fp = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&signed_init)
+            .unwrap();
+        let mut previous_fp = std::fs::OpenOptions::new()
+            .read(true)
+            .open(&previous_frag)
+            .unwrap();
+        let reader = Reader::from_fragment("m4s", &mut init_fp, &mut previous_fp).unwrap();
+
+        let rh = reader
+            .active_manifest()
+            .unwrap()
+            .find_assertion::<RollingHash>(crate::assertions::labels::ROLLING_HASH)
+            .unwrap();
+
+        let rolling_hash = rh.rolling_hash().unwrap();
+        let previous_hash = rh.previous_hash().unwrap();
+
+        // validation from memory
+        let signed_frag = format!("{base}/signed/segment_{:09}.m4s", 2);
+        let reader = Reader::from_rolling_hash_memory(
+            "m4s",
+            signed_init,
+            signed_frag,
+            rolling_hash,
+            previous_hash,
+        )
+        .unwrap();
+
+        // check if all went well
+        assert!(
+            reader
+                .validation_results()
+                .unwrap()
+                .active_manifest()
+                .unwrap()
+                .failure()
+                .is_empty(),
+            "false memory validation: {reader:?}"
+        );
     }
 }

@@ -1,29 +1,18 @@
-use std::path::PathBuf;
+use std::{io::Write, path::PathBuf};
 
-use rocket::{http::Status, serde::json::Json, Data, State};
+use rocket::{
+    data::ByteUnit, http::Status, serde::json::Json, tokio::io::AsyncReadExt, Data, State,
+};
+
+use crate::log_err;
 
 use super::{
     merkle_tree::MerkleTree,
-    utility::{is_fragment, is_init, process_request_body},
+    utility::{find_init, is_fragment, is_init, process_request_body},
     LiveSigner,
 };
 
 pub(super) type Result<T> = core::result::Result<T, Status>;
-
-macro_rules! log_err {
-    ($fn:expr, $name:expr) => {
-        $fn.map_err(|err| {
-            log::error!("{}: {err}", $name);
-            Status::InternalServerError
-        })
-    };
-    ($fn:expr, $name:expr, $err:expr) => {
-        $fn.map_err(|err| {
-            log::error!("{}: {err}", $name);
-            $err
-        })
-    };
-}
 
 #[rocket::post("/<name>/<uri..>", data = "<body>")]
 pub(crate) async fn post_ingest(
@@ -32,7 +21,7 @@ pub(crate) async fn post_ingest(
     body: Data<'_>,
     state: &State<LiveSigner>,
 ) -> Result<()> {
-    let local = state.local_path(name, &uri);
+    let local = state.local_path(name, &uri, None);
 
     // read body and save to local disk
 
@@ -81,6 +70,15 @@ pub(crate) async fn post_ingest(
             }
             _ => {}
         } */
+        // TODO placeholder until stuff is properly in manifests
+        let url = log_err!(
+            state.cdn_url(name, &uri, Some(crate::live::ForwardType::RollingHash)),
+            "cdn url RollingHash"
+        )?;
+        log_err!(
+            state.post(url, Some(buf.clone())).await,
+            "post RollingHash manifests"
+        )?;
         return Ok(());
     }
 
@@ -105,6 +103,33 @@ pub(crate) async fn delete_ingest(
     log_err!(state.delete(target).await, "forward delete")?;
 
     Ok(())
+}
+
+#[rocket::post("/?<rep>&<name>", data = "<body>")]
+pub(crate) async fn verify_rolling_hash(
+    name: &str,
+    rep: u8,
+    body: Data<'_>,
+    state: &State<LiveSigner>,
+) -> Result<String> {
+    let mut fragment = Vec::new();
+    let mut body = body.open(ByteUnit::max_value());
+    log_err!(body.read_to_end(&mut fragment).await, "read verify body")?;
+
+    let dir = state.local(&format!("{name}_rolling-hash"), rep);
+    let init_path = log_err!(find_init(dir), "find init")?;
+    let mut fragment_fp = log_err!(tempfile::NamedTempFile::new(), "create fragment tempfile")?;
+    log_err!(
+        fragment_fp.write_all(&fragment),
+        "write fragment to tempfile"
+    )?;
+
+    let verifier = log_err!(
+        c2pa::Reader::from_rolling_hash_hack("m4s", &init_path, fragment_fp.path()),
+        "verify rolling hash hack"
+    )?;
+
+    Ok(verifier.json())
 }
 
 #[rocket::get("/merkle-tree/<name>/<uri..>")]

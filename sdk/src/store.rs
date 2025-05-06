@@ -43,8 +43,8 @@ use crate::{
     },
     assertions::{
         labels::{self, CLAIM},
-        BmffHash, DataBox, DataHash, DataMap, ExclusionsMap, Ingredient, Relationship, SubsetMap,
-        UserCbor,
+        BmffHash, DataBox, DataHash, DataMap, ExclusionsMap, Ingredient, Relationship, RollingHash,
+        SubsetMap, UserCbor,
     },
     asset_io::{
         CAIRead, CAIReadWrite, HashBlockObjectType, HashObjectPositions, RemoteRefEmbedType,
@@ -1623,6 +1623,51 @@ impl Store {
         Ok(hashes)
     }
 
+    fn generate_rolling_hash_for_stream(
+        asset_stream: &mut dyn CAIRead,
+        alg: &str,
+        calc_hashes: bool,
+    ) -> Result<RollingHash> {
+        // The spec has mandatory BMFF exclusion ranges for certain atoms.
+        // The function makes sure those are included.
+
+        let mut rh = RollingHash::new("jumbf manifest", alg);
+        let exclusions = rh.exclusions_mut();
+
+        // jumbf exclusion
+        let mut uuid = ExclusionsMap::new("/uuid".to_owned());
+        let data = DataMap {
+            offset: 8,
+            value: vec![
+                216, 254, 195, 214, 27, 14, 72, 60, 146, 151, 88, 40, 135, 126, 196, 129,
+            ], // C2PA identifier
+        };
+        let data_vec = vec![data];
+        uuid.data = Some(data_vec);
+        exclusions.push(uuid);
+
+        // ftyp exclusion
+        let ftyp = ExclusionsMap::new("/ftyp".to_owned());
+        exclusions.push(ftyp);
+
+        // /mfra/ exclusion
+        let mfra = ExclusionsMap::new("/mfra".to_owned());
+        exclusions.push(mfra);
+
+        if calc_hashes {
+            rh.gen_hash_from_stream(asset_stream)?;
+        } else {
+            match alg {
+                "sha256" => rh.set_hash([0u8; 32].to_vec()),
+                "sha384" => rh.set_hash([0u8; 48].to_vec()),
+                "sha512" => rh.set_hash([0u8; 64].to_vec()),
+                _ => return Err(Error::UnsupportedType),
+            }
+        }
+
+        Ok(rh)
+    }
+
     fn generate_bmff_data_hash_for_stream(
         asset_stream: &mut dyn CAIRead,
         alg: &str,
@@ -2215,6 +2260,14 @@ impl Store {
     }
 
     /// Embed the claims store as jumbf into fragmented assets.
+    #[async_generic(async_signature(
+        &mut self,
+        asset_path: &Path,
+        fragments: &Vec<std::path::PathBuf>,
+        output_path: &Path,
+        signer: &dyn AsyncSigner,
+        window_size: usize,
+    ))]
     #[cfg(feature = "file_io")]
     pub fn save_to_bmff_fragmented(
         &mut self,
@@ -2234,7 +2287,12 @@ impl Store {
         }
 
         let mut validation_log = OneShotStatusTracker::default();
-        let jumbf = self.to_jumbf(signer)?;
+
+        let jumbf = if _sync {
+            self.to_jumbf(signer)?
+        } else {
+            self.to_jumbf_async(signer)?
+        };
 
         // use temp store so mulitple calls will work (the Store is not finalized this way)
         let mut temp_store = Store::from_jumbf(&jumbf, &mut validation_log)?;
@@ -2248,10 +2306,177 @@ impl Store {
         )?;
 
         let pc = temp_store.provenance_claim().ok_or(Error::ClaimEncoding)?;
-        let sig = temp_store.sign_claim(pc, signer, signer.reserve_size())?;
+        let sig = if _sync {
+            temp_store.sign_claim(pc, signer, signer.reserve_size())?
+        } else {
+            temp_store
+                .sign_claim_async(pc, signer, signer.reserve_size())
+                .await?
+        };
         let sig_placeholder = Store::sign_claim_placeholder(pc, signer.reserve_size());
 
         match temp_store.finish_save(jumbf_bytes, output_path, sig, &sig_placeholder) {
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    #[async_generic()]
+    #[cfg(feature = "file_io")]
+    fn start_save_bmff_rolling_hash<P1, P2, P3>(
+        &mut self,
+        asset_path: P1,
+        new_fragment: P2,
+        output_dir: P3,
+        reserve_size: usize,
+    ) -> Result<Vec<u8>>
+    where
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
+        P3: AsRef<Path>,
+    {
+        // get the provenance claim changing mutability
+        let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?;
+        pc.clear_data(); // clear since we are reusing an existing claim
+
+        // use signed asset file if available
+        let asset_path = crate::utils::rolling_hash::to_signed_path(&asset_path, &output_dir)
+            .unwrap_or(asset_path.as_ref().to_path_buf());
+
+        // 2) Get hash ranges if needed
+        let mut asset_stream = std::fs::File::open(&asset_path)?;
+
+        // attempt to extract Rolling Hash from asset
+        let mut rolling_hash = None;
+        if let Ok(reader) = crate::Reader::from_stream("m4s", &asset_stream) {
+            if let Some(manifest) = reader.active_manifest() {
+                if let Ok(rh) =
+                    manifest.find_assertion::<RollingHash>(crate::assertions::labels::ROLLING_HASH)
+                {
+                    rolling_hash = Some(rh);
+                }
+            }
+        }
+        // init new ones if none found
+        let mut rolling_hash = rolling_hash.unwrap_or(Self::generate_rolling_hash_for_stream(
+            &mut asset_stream,
+            pc.alg(),
+            false,
+        )?);
+        rolling_hash.clear_hash();
+        rolling_hash.shift_rolling_hash();
+
+        rolling_hash.add_new_fragment(pc.alg(), &asset_path, &new_fragment, &output_dir)?;
+
+        // add in the BMFF assertion
+        pc.add_assertion(&rolling_hash)?;
+
+        // 3) Generate in memory CAI jumbf block
+        // and write preliminary jumbf store to file
+        // source and dest the same so save_jumbf_to_file will use the same file since we have already cloned
+        let file_name = asset_path
+            .file_name()
+            .ok_or(Error::BadParam("invalid output path".to_string()))?;
+        let output_asset = output_dir.as_ref().join(file_name);
+
+        let mut data = self.to_jumbf_internal(reserve_size)?;
+        let jumbf_size = data.len();
+        save_jumbf_to_file(&data, output_asset.as_ref(), Some(output_asset.as_ref()))?;
+
+        // generate actual hash values
+        let pc = self.provenance_claim_mut().ok_or(Error::ClaimEncoding)?; // reborrow to change mutability
+
+        let rh_assertions = pc.rolling_hash_assertions();
+        if !rh_assertions.is_empty() {
+            let mut rh = RollingHash::from_assertion(rh_assertions[0])?;
+            rh.update_fragmented_inithash(&output_asset)?;
+            pc.update_rolling_hash(rh)?;
+        }
+
+        // regenerate the jumbf because the cbor changed
+        data = self.to_jumbf_internal(reserve_size)?;
+        if jumbf_size != data.len() {
+            return Err(Error::JumbfCreationError);
+        }
+
+        Ok(data) // return JUMBF data
+    }
+
+    /// Embed the claims store as jumbf into fragmented assets
+    /// using rolling hashes.
+    #[async_generic(async_signature(
+        &mut self,
+        asset_path: P1,
+        new_fragment: P2,
+        output_dir: P3,
+        signer: &dyn AsyncSigner,
+    ))]
+    #[cfg(feature = "file_io")]
+    pub fn save_to_bmff_rolling_hash<P1, P2, P3>(
+        &mut self,
+        asset_path: P1,
+        new_fragment: P2,
+        output_dir: P3,
+        signer: &dyn Signer,
+    ) -> Result<()>
+    where
+        P1: AsRef<Path>,
+        P2: AsRef<Path>,
+        P3: AsRef<Path>,
+    {
+        match get_supported_file_extension(asset_path.as_ref()) {
+            Some(ext) => {
+                if !is_bmff_format(&ext) {
+                    return Err(Error::UnsupportedType);
+                }
+            }
+            None => return Err(Error::UnsupportedType),
+        }
+
+        let mut validation_log = OneShotStatusTracker::default();
+        let jumbf = if _sync {
+            self.to_jumbf(signer)?
+        } else {
+            self.to_jumbf_async(signer)?
+        };
+
+        // use temp store so mulitple calls will work (the Store is not finalized this way)
+        let mut temp_store = Store::from_jumbf(&jumbf, &mut validation_log)?;
+
+        let jumbf_bytes = if _sync {
+            temp_store.start_save_bmff_rolling_hash(
+                &asset_path,
+                new_fragment,
+                &output_dir,
+                signer.reserve_size(),
+            )?
+        } else {
+            temp_store
+                .start_save_bmff_rolling_hash_async(
+                    &asset_path,
+                    new_fragment,
+                    &output_dir,
+                    signer.reserve_size(),
+                )
+                .await?
+        };
+
+        let pc = temp_store.provenance_claim().ok_or(Error::ClaimEncoding)?;
+        let sig = if _sync {
+            temp_store.sign_claim(pc, signer, signer.reserve_size())?
+        } else {
+            temp_store
+                .sign_claim_async(pc, signer, signer.reserve_size())
+                .await?
+        };
+        let sig_placeholder = Store::sign_claim_placeholder(pc, signer.reserve_size());
+
+        let file_name = asset_path
+            .as_ref()
+            .file_name()
+            .ok_or(Error::BadParam("invalid fragment path".to_string()))?;
+        let init_output = output_dir.as_ref().join(file_name);
+        match temp_store.finish_save(jumbf_bytes, &init_output, sig, &sig_placeholder) {
             Ok(_) => Ok(()),
             Err(e) => Err(e),
         }

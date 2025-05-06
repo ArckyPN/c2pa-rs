@@ -47,6 +47,9 @@ pub use metadata::{
     c2pa_source, Actor, AssetType, DataBox, DataSource, Metadata, ReviewCode, ReviewRating,
 };
 
+mod rolling_hash;
+pub use rolling_hash::{FragmentRollingHash, RollingHash};
+
 mod schema_org;
 pub use schema_org::{SchemaDotOrg, SchemaDotOrgPerson};
 

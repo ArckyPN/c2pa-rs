@@ -226,6 +226,136 @@ impl Reader {
         })
     }
 
+    /// Create a [`Reader`] from an initial segment and a fragment stream.
+    /// This would be used to load and validate fragmented MP4 files that span multiple separate asset files.
+    /// # Arguments
+    /// * `format` - The format of the stream.
+    /// * `stream` - The initial segment stream.
+    /// * `fragment` - The fragment stream.
+    /// * `previous_hash` - The previous rolling hash result.
+    /// # Returns
+    /// A [`Reader`] for the manifest store.
+    /// # Errors
+    /// This function returns an [`Error`] if the streams are not valid, or severe errors occur in validation.
+    /// You must check validation status for non-severe errors.
+    // FIXME I would prefer if it were possible with the same fn structure as from_fragment above, but it doesn't parse the RollingHash Assertion correctly, fix possible?
+    #[async_generic()]
+    #[cfg(feature = "file_io")]
+    pub fn from_rolling_hash<P1, P2>(
+        format: &str,
+        stream: P1,
+        fragment: P2,
+        previous_hash: &[u8],
+    ) -> Result<Self>
+    where
+        P1: AsRef<std::path::Path>,
+        P2: AsRef<std::path::Path>,
+    {
+        let mut validation_log = DetailedStatusTracker::default();
+        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
+        let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
+
+        let mut stream_fp = std::fs::OpenOptions::new().read(true).open(stream)?;
+        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
+
+        let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
+                                                                                 // verify the store
+        if verify {
+            let mut fragment = ClaimAssetData::RollingHash(
+                &mut stream_fp,
+                &mut fragment_fp,
+                format,
+                previous_hash,
+            );
+            if _sync {
+                // verify store and claims
+                Store::verify_store(&store, &mut fragment, &mut validation_log)
+            } else {
+                // verify store and claims
+                Store::verify_store_async(&store, &mut fragment, &mut validation_log).await
+            }?;
+        };
+
+        Ok(Self {
+            manifest_store: ManifestStore::from_store(store, &validation_log),
+        })
+    }
+
+    #[async_generic()]
+    #[cfg(feature = "file_io")]
+    pub fn from_rolling_hash_memory<P1, P2>(
+        format: &str,
+        stream: P1,
+        fragment: P2,
+        rolling_hash: &[u8],
+        previous_hash: &[u8],
+    ) -> Result<Self>
+    where
+        P1: AsRef<std::path::Path>,
+        P2: AsRef<std::path::Path>,
+    {
+        let mut validation_log = DetailedStatusTracker::default();
+        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
+        let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
+
+        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
+
+        let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
+                                                                                 // verify the store
+        if verify {
+            let mut fragment = ClaimAssetData::RollingHashFragment(
+                &mut fragment_fp,
+                format,
+                rolling_hash,
+                previous_hash,
+            );
+            if _sync {
+                // verify store and claims
+                Store::verify_store(&store, &mut fragment, &mut validation_log)
+            } else {
+                // verify store and claims
+                Store::verify_store_async(&store, &mut fragment, &mut validation_log).await
+            }?;
+        };
+
+        Ok(Self {
+            manifest_store: ManifestStore::from_store(store, &validation_log),
+        })
+    }
+
+    #[async_generic()]
+    #[cfg(feature = "file_io")]
+    pub fn from_rolling_hash_hack<P1, P2>(format: &str, stream: P1, fragment: P2) -> Result<Self>
+    where
+        P1: AsRef<std::path::Path>,
+        P2: AsRef<std::path::Path>,
+    {
+        let mut validation_log = DetailedStatusTracker::default();
+        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
+        let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
+
+        let mut init_fp = std::fs::OpenOptions::new().read(true).open(stream)?;
+        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
+
+        let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
+                                                                                 // verify the store
+        if verify {
+            let mut fragment =
+                ClaimAssetData::StreamFragment(&mut init_fp, &mut fragment_fp, format);
+            if _sync {
+                // verify store and claims
+                Store::verify_store(&store, &mut fragment, &mut validation_log)
+            } else {
+                // verify store and claims
+                Store::verify_store_async(&store, &mut fragment, &mut validation_log).await
+            }?;
+        };
+
+        Ok(Self {
+            manifest_store: ManifestStore::from_store(store, &validation_log),
+        })
+    }
+
     #[cfg(feature = "file_io")]
     /// Loads a [`Reader`]` from an initial segment and fragments.  This
     /// would be used to load and validate fragmented MP4 files that span
