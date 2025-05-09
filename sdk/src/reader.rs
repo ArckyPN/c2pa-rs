@@ -238,35 +238,23 @@ impl Reader {
     /// # Errors
     /// This function returns an [`Error`] if the streams are not valid, or severe errors occur in validation.
     /// You must check validation status for non-severe errors.
-    // FIXME I would prefer if it were possible with the same fn structure as from_fragment above, but it doesn't parse the RollingHash Assertion correctly, fix possible?
     #[async_generic()]
     #[cfg(feature = "file_io")]
-    pub fn from_rolling_hash<P1, P2>(
+    pub fn from_rolling_hash(
         format: &str,
-        stream: P1,
-        fragment: P2,
+        mut stream: impl Read + Seek + Send,
+        mut fragment: impl Read + Seek + Send,
         previous_hash: &[u8],
-    ) -> Result<Self>
-    where
-        P1: AsRef<std::path::Path>,
-        P2: AsRef<std::path::Path>,
-    {
+    ) -> Result<Self> {
         let mut validation_log = DetailedStatusTracker::default();
-        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
+        let manifest_bytes = Store::load_jumbf_from_stream(format, &mut stream)?;
         let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
-
-        let mut stream_fp = std::fs::OpenOptions::new().read(true).open(stream)?;
-        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
 
         let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
                                                                                  // verify the store
         if verify {
-            let mut fragment = ClaimAssetData::RollingHash(
-                &mut stream_fp,
-                &mut fragment_fp,
-                format,
-                previous_hash,
-            );
+            let mut fragment =
+                ClaimAssetData::RollingHash(&mut stream, &mut fragment, format, previous_hash);
             if _sync {
                 // verify store and claims
                 Store::verify_store(&store, &mut fragment, &mut validation_log)
@@ -281,30 +269,27 @@ impl Reader {
         })
     }
 
+    /// Validate a Rolling Hash Fragment with Rolling Hash and Anchor Point from memory.
+    ///
+    /// The Init File is only needed to get the Exclusion Ranges and possible Algorithm fallback.
     #[async_generic()]
     #[cfg(feature = "file_io")]
-    pub fn from_rolling_hash_memory<P1, P2>(
+    pub fn from_rolling_hash_memory(
         format: &str,
-        stream: P1,
-        fragment: P2,
+        mut stream: impl Read + Seek + Send,
+        mut fragment: impl Read + Seek + Send,
         rolling_hash: &[u8],
         previous_hash: &[u8],
-    ) -> Result<Self>
-    where
-        P1: AsRef<std::path::Path>,
-        P2: AsRef<std::path::Path>,
-    {
+    ) -> Result<Self> {
         let mut validation_log = DetailedStatusTracker::default();
-        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
+        let manifest_bytes = Store::load_jumbf_from_stream(format, &mut stream)?;
         let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
-
-        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
 
         let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
                                                                                  // verify the store
         if verify {
             let mut fragment = ClaimAssetData::RollingHashFragment(
-                &mut fragment_fp,
+                &mut fragment,
                 format,
                 rolling_hash,
                 previous_hash,

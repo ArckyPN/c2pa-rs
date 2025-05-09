@@ -21,7 +21,9 @@ mod asset_types;
 pub use asset_types::{AssetTypeEnum, AssetTypes};
 
 mod bmff_hash;
-pub use bmff_hash::{BmffHash, BmffMerkleMap, DataMap, ExclusionsMap, SubsetMap};
+pub use bmff_hash::{
+    BmffHash, BmffMerkleMap, DataMap, ExclusionsMap, FragmentRollingHash, SubsetMap,
+};
 
 mod box_hash;
 pub use box_hash::{BoxHash, BoxMap, C2PA_BOXHASH};
@@ -46,9 +48,6 @@ mod metadata;
 pub use metadata::{
     c2pa_source, Actor, AssetType, DataBox, DataSource, Metadata, ReviewCode, ReviewRating,
 };
-
-mod rolling_hash;
-pub use rolling_hash::{FragmentRollingHash, RollingHash};
 
 mod schema_org;
 pub use schema_org::{SchemaDotOrg, SchemaDotOrgPerson};

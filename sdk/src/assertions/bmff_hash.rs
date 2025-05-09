@@ -30,7 +30,9 @@ use sha2::{Digest, Sha256, Sha384, Sha512};
 use crate::{
     assertion::{Assertion, AssertionBase, AssertionCbor},
     assertions::labels,
-    asset_handlers::bmff_io::{bmff_to_jumbf_exclusions, read_bmff_c2pa_boxes, BoxInfoLite},
+    asset_handlers::bmff_io::{
+        bmff_to_jumbf_exclusions, read_bmff_c2pa_boxes, BoxInfoLite, C2PABmffBoxesRollingHash,
+    },
     asset_io::CAIRead,
     cbor_types::UriT,
     utils::{
@@ -258,6 +260,9 @@ pub struct BmffHash {
     merkle: Option<Vec<MerkleMap>>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
+    rolling_hash: Option<RollingHash>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
 
     #[serde(skip_serializing)]
@@ -276,6 +281,7 @@ impl BmffHash {
             alg: Some(alg.to_string()),
             hash: None,
             merkle: None,
+            rolling_hash: None,
             name: Some(name.to_string()),
             url,
             bmff_version: ASSERTION_CREATION_VERSION,
@@ -300,6 +306,10 @@ impl BmffHash {
 
     pub fn merkle(&self) -> Option<&Vec<MerkleMap>> {
         self.merkle.as_ref()
+    }
+
+    pub fn rolling_hash(&self) -> Option<&RollingHash> {
+        self.rolling_hash.as_ref()
     }
 
     pub fn set_hash(&mut self, hash: Vec<u8>) {
@@ -333,6 +343,13 @@ impl BmffHash {
 
     pub fn set_merkle(&mut self, merkle: Vec<MerkleMap>) {
         self.merkle = Some(merkle);
+    }
+
+    pub fn previous_hash(&self) -> Option<&Vec<u8>> {
+        match &self.rolling_hash {
+            Some(hash) => hash.previous_hash(),
+            None => None,
+        }
     }
 
     /// Generate the hash value for the asset using the range from the BmffHash.
@@ -421,8 +438,33 @@ impl BmffHash {
             }
 
             Ok(())
+        } else if let Some(rh) = &mut self.rolling_hash {
+            let mut init_stream = std::fs::File::open(asset_path)?;
+
+            let curr_alg = match rh.alg() {
+                Some(alg) => alg.to_owned(),
+                None => match &self.alg {
+                    Some(a) => a.to_string(),
+                    None => "sha256".to_string(),
+                },
+            };
+
+            // create the initHash only once
+            let exclusions = bmff_to_jumbf_exclusions(
+                &mut init_stream,
+                &self.exclusions,
+                self.bmff_version > 1,
+            )?;
+            init_stream.rewind()?;
+            let hash = hash_stream_by_alg(&curr_alg, &mut init_stream, Some(exclusions), true)?;
+
+            rh.set_init_hash(hash);
+
+            Ok(())
         } else {
-            Err(Error::BadParam("expected MerkleMap object".to_string()))
+            Err(Error::BadParam(
+                "expected MerkleMap or RollingHash object".to_string(),
+            ))
         }
     }
 
@@ -767,6 +809,14 @@ impl BmffHash {
                     "Merkle iloc not yet supported".to_owned(),
                 ));
             }
+        } else if let Some(rh) = self.rolling_hash() {
+            if let Some(init_hash) = rh.init_hash() {
+                if !verify_stream_by_alg(&curr_alg, init_hash, reader, Some(exclusions), true) {
+                    return Err(Error::HashMismatch(
+                        "BMFF init file hash mismatch".to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -907,6 +957,12 @@ impl BmffHash {
             ));
         }
 
+        if self.merkle().is_some() && self.rolling_hash().is_some() {
+            return Err(Error::HashMismatch(
+                "A BMFF asset should not have both MerkleMap and RollingHash".to_string(),
+            ));
+        }
+
         // Merkle hashed BMFF
         if let Some(mm_vec) = self.merkle() {
             // get merkle boxes from segment
@@ -973,12 +1029,140 @@ impl BmffHash {
                     return Err(Error::HashMismatch("Fragment had no MerkleMap".to_string()));
                 }
             }
+        } else if let Some(rh) = self.rolling_hash() {
+            // validate init hash
+            self.verify_stream_hash(init_stream, Some(&curr_alg))?;
+
+            // validate previous hash with fragment anchor point
+            if let Some(prev_hash) = rh.previous_hash() {
+                let c2pa_boxes = C2PABmffBoxesRollingHash::from_reader(fragment_stream)?;
+
+                // ensure there aren't more than one uuid box
+                if c2pa_boxes.rolling_hashes.len() > 1 || c2pa_boxes.bmff_merkle_box_infos.len() > 1
+                {
+                    return Err(Error::HashMismatch(
+                        "BMFF Fragments shouldn't have more than 1 BmffMerkleMap".to_string(),
+                    ));
+                }
+
+                if let Some(anchor_point) = &c2pa_boxes.rolling_hashes[0].anchor_point {
+                    if *prev_hash != **anchor_point {
+                        return Err(Error::HashMismatch(
+                            "Previous Hash does not match Fragment Anchor Point".to_string(),
+                        ));
+                    }
+                } else {
+                    return Err(Error::HashMismatch("Missing Anchor Point".to_string()));
+                }
+            }
+
+            // validate rolling hash
+            if let Some(roll_hash) = rh.rolling_hash() {
+                let exclusions = bmff_to_jumbf_exclusions(fragment_stream, &self.exclusions, true)?;
+
+                let frag_hash =
+                    hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
+
+                let (left, right) = if let Some(prev_hash) = rh.previous_hash() {
+                    (prev_hash, Some(frag_hash.as_slice()))
+                } else {
+                    (&frag_hash, None)
+                };
+                let ref_hash = concat_and_hash(&curr_alg, left, right);
+
+                if ref_hash != *roll_hash {
+                    return Err(Error::HashMismatch(
+                        "Fragment Hash does not match Rolling Hash".to_string(),
+                    ));
+                }
+            } else {
+                return Err(Error::HashMismatch(
+                    "Asset File has no Rolling Hash".to_string(),
+                ));
+            }
         } else {
             return Err(Error::HashMismatch(
                 "Merkle value must be present for a fragmented BMFF asset".to_string(),
             ));
         }
 
+        Ok(())
+    }
+
+    pub fn verify_fragment(
+        &self,
+        init_stream: &mut dyn CAIRead,
+        fragment_stream: &mut dyn CAIRead,
+        alg: Option<&str>,
+        previous_hash: &[u8],
+    ) -> crate::Result<()> {
+        // validate init hash
+        self.verify_stream_hash(init_stream, alg)?;
+
+        if let Some(rh) = self.rolling_hash() {
+            let curr_alg = match &self.alg {
+                Some(a) => a.clone(),
+                None => match alg {
+                    Some(a) => a.to_owned(),
+                    None => "sha256".to_string(),
+                },
+            };
+
+            if let Some(roll_hash) = rh.rolling_hash() {
+                let c2pa_boxes = C2PABmffBoxesRollingHash::from_reader(fragment_stream)?;
+
+                // ensure there aren't more than one uuid box
+                if c2pa_boxes.rolling_hashes.len() > 1 || c2pa_boxes.bmff_merkle_box_infos.len() > 1
+                {
+                    return Err(Error::HashMismatch(
+                        "BMFF Fragments shouldn't have more than 1 BmffMerkleMap".to_string(),
+                    ));
+                }
+
+                let exclusions = bmff_to_jumbf_exclusions(fragment_stream, &self.exclusions, true)?;
+
+                let frag_hash =
+                    hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
+
+                let ref_hash = concat_and_hash(&curr_alg, previous_hash, Some(&frag_hash));
+
+                if ref_hash != *roll_hash {
+                    return Err(Error::HashMismatch(
+                        "Fragment Hash does not match Rolling Hash".to_string(),
+                    ));
+                }
+            }
+        } else {
+            return Err(Error::HashMismatch("Missing RollingHash".to_string()));
+        }
+
+        Ok(())
+    }
+
+    pub fn verify_fragment_memory(
+        &self,
+        fragment_stream: &mut dyn CAIRead,
+        alg: Option<&str>,
+        rolling_hash: &[u8],
+        previous_hash: &[u8],
+    ) -> crate::Result<()> {
+        let curr_alg = match &self.alg {
+            Some(a) => a.clone(),
+            None => match alg {
+                Some(a) => a.to_owned(),
+                None => "sha256".to_string(),
+            },
+        };
+
+        // hash fragment stream
+        let exclusions = bmff_to_jumbf_exclusions(fragment_stream, &self.exclusions, true)?;
+        let frag_hash = hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
+
+        let ref_hash = concat_and_hash(&curr_alg, previous_hash, Some(&frag_hash));
+
+        if ref_hash != rolling_hash {
+            return Err(Error::HashMismatch("missing rolling hash".to_string()));
+        }
         Ok(())
     }
 
@@ -1256,6 +1440,127 @@ impl BmffHash {
 
         Ok(())
     }
+
+    pub fn add_rolling_hash_fragment<P1, P2, P3>(
+        &mut self,
+        alg: &str,
+        asset_path: P1,
+        fragment: P2,
+        output_path: P3,
+    ) -> crate::Result<()>
+    where
+        P1: AsRef<std::path::Path>,
+        P2: AsRef<std::path::Path>,
+        P3: AsRef<std::path::Path>,
+    {
+        // create output dir, if it doesn't exist
+        let output_dir = output_path
+            .as_ref()
+            .parent()
+            .ok_or(Error::BadParam("invalid output path".to_string()))?;
+        if !output_dir.exists() {
+            std::fs::create_dir_all(output_dir)?;
+        } else if !output_dir.is_dir() {
+            // make sure it is a directory
+            return Err(Error::BadParam("output_dir is not a directory".to_string()));
+        }
+
+        // copy fragment to output dir
+        let file_name = fragment
+            .as_ref()
+            .file_name()
+            .ok_or(Error::BadParam("invalid fragment path".to_string()))?;
+        let fragment_output = output_dir.join(file_name);
+        std::fs::copy(&fragment, &fragment_output)?;
+
+        // copy init file, if its output doesn't exist
+        if !output_path.as_ref().exists() {
+            std::fs::copy(&asset_path, &output_path)?;
+        }
+
+        let mut reader = std::fs::File::open(&fragment)?;
+        let c2pa_boxes = C2PABmffBoxesRollingHash::from_reader(&mut reader)?;
+        let box_infos = &c2pa_boxes.box_infos;
+
+        if box_infos.iter().filter(|b| b.path == "moof").count() != 1 {
+            return Err(Error::BadParam("expected 1 moof in fragment".to_string()));
+        }
+        if box_infos.iter().filter(|b| b.path == "mdat").count() != 1 {
+            return Err(Error::BadParam("expected 1 mdat in fragment".to_string()));
+        }
+
+        // ensure there aren't more than one uuid box
+        if c2pa_boxes.rolling_hashes.len() > 1 || c2pa_boxes.bmff_merkle_box_infos.len() > 1 {
+            return Err(Error::BadParam(
+                "BMFF Fragments shouldn't have more than 1 BmffMerkleMap".to_string(),
+            ));
+        }
+
+        // build the UUID Box of the Fragment
+        // box content is simply the previous rolling hash
+        let anchor_data = FragmentRollingHash {
+            anchor_point: self.previous_hash().cloned().map(|inner| inner.into()),
+        };
+        let anchor_data = serde_cbor::to_vec(&anchor_data)
+            .map_err(|err| Error::AssertionEncoding(err.to_string()))?;
+
+        let mut uuid_box_data = Vec::with_capacity(anchor_data.len() * 2);
+        crate::asset_handlers::bmff_io::write_c2pa_box(
+            &mut uuid_box_data,
+            &[],
+            false,
+            &anchor_data,
+        )?;
+
+        // insert the UUID Box in the output Fragment
+        let mut source = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&fragment)?;
+        let mut dest = std::fs::OpenOptions::new()
+            .write(true)
+            .read(true)
+            .open(&fragment_output)?;
+        let first_moof = box_infos
+            .iter()
+            .find(|b| b.path == "moof")
+            .ok_or(Error::BadParam("expected 1 moof in fragment".to_string()))?;
+        crate::utils::io_utils::insert_data_at(
+            &mut source,
+            &mut dest,
+            first_moof.offset,
+            &uuid_box_data,
+        )?;
+
+        // create the new rolling hash: hash(previous hash + fragment hash)
+        let hash_ranges = bmff_to_jumbf_exclusions(&mut dest, self.exclusions(), true)?;
+        let fragment_hash = hash_stream_by_alg(alg, &mut dest, Some(hash_ranges), true)?;
+
+        // prepare required hashes
+        let (left, right) = if let Some(prev) = self.previous_hash() {
+            // when previous available: previous + fragment
+            (prev, Some(fragment_hash.as_slice()))
+        } else {
+            // otherwise: only fragment
+            (&fragment_hash, None)
+        };
+
+        let mut rh = self.rolling_hash.clone().unwrap_or(RollingHash::new(alg)?);
+
+        // set the actual rolling hash
+        rh.rolling_hash
+            .replace(concat_and_hash(alg, left, right).into());
+        self.rolling_hash.replace(rh);
+
+        Ok(())
+    }
+
+    /// moves the rolling hash to the previous hash
+    pub fn shift_rolling_hash(&mut self) {
+        if let Some(rh) = &mut self.rolling_hash {
+            rh.shift_rolling_hash();
+        }
+    }
 }
 
 impl AssertionCbor for BmffHash {}
@@ -1292,6 +1597,100 @@ fn stsc_index(track: &Mp4Track, sample_id: u32) -> crate::Result<usize> {
         }
     }
     Ok(track.trak.mdia.minf.stbl.stsc.entries.len() - 1)
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Default, Clone)]
+pub struct RollingHash {
+    /// Hashing Algorithm
+    #[serde(skip_serializing_if = "Option::is_none")]
+    alg: Option<String>,
+
+    /// The rolling hash result.
+    ///
+    /// Used during validation for comparison.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rolling_hash: Option<ByteBuf>,
+
+    /// The previous rolling hash.
+    ///
+    /// Used as anchor point, when joining
+    /// the live stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    previous_hash: Option<ByteBuf>,
+
+    /// The Hash of the asset file (Init Fragment).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    init_hash: Option<ByteBuf>,
+}
+
+impl RollingHash {
+    pub fn new(alg: &str) -> crate::Result<Self> {
+        Ok(Self {
+            alg: Some(alg.to_string()),
+            rolling_hash: None,
+            previous_hash: None,
+            init_hash: Some(match alg {
+                // placeholder init hash to be filled once manifest is inserted
+                "sha256" => ByteBuf::from([0u8; 32].to_vec()),
+                "sha384" => ByteBuf::from([0u8; 48].to_vec()),
+                "sha512" => ByteBuf::from([0u8; 64].to_vec()),
+                _ => return Err(Error::UnsupportedType),
+            }),
+        })
+    }
+
+    pub fn alg(&self) -> Option<&str> {
+        self.alg.as_deref()
+    }
+
+    pub fn set_alg(&mut self, alg: &str) {
+        self.alg.replace(alg.to_owned());
+    }
+
+    pub fn rolling_hash(&self) -> Option<&Vec<u8>> {
+        self.rolling_hash.as_deref()
+    }
+
+    pub fn set_rolling_hash(&mut self, hash: Vec<u8>) {
+        self.rolling_hash = Some(ByteBuf::from(hash));
+    }
+
+    pub fn clear_rolling_hash(&mut self) {
+        self.rolling_hash = None;
+    }
+
+    pub fn previous_hash(&self) -> Option<&Vec<u8>> {
+        self.previous_hash.as_deref()
+    }
+
+    pub fn set_previous_hash(&mut self, hash: Vec<u8>) {
+        self.previous_hash = Some(ByteBuf::from(hash));
+    }
+
+    pub fn clear_previous_hash(&mut self) {
+        self.previous_hash = None;
+    }
+
+    /// moves the rolling hash to the previous hash
+    pub fn shift_rolling_hash(&mut self) {
+        self.previous_hash = self.rolling_hash.take();
+    }
+
+    pub fn init_hash(&self) -> Option<&Vec<u8>> {
+        self.init_hash.as_deref()
+    }
+
+    pub fn set_init_hash(&mut self, hash: Vec<u8>) {
+        self.init_hash = Some(ByteBuf::from(hash));
+    }
+
+    pub fn clear_init_hash(&mut self) {
+        self.init_hash = None;
+    }
+}
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct FragmentRollingHash {
+    pub(crate) anchor_point: Option<ByteBuf>,
 }
 
 /* we need shippable examples

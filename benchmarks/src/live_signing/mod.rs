@@ -84,7 +84,7 @@ impl LiveBenchmark {
                 let signer = self.signer()?;
 
                 let now = Instant::now();
-                builder.sign_live_bmff(&signer, &init, &fragments[0..i].to_vec(), &out, 8)?;
+                builder.sign_live_bmff(&signer, &init, &fragments[0..i].to_vec(), &out, Some(8))?;
                 data.push(now.elapsed().as_millis());
             }
 

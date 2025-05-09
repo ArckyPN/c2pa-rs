@@ -1061,7 +1061,7 @@ impl Builder {
             fragment_paths,
             output_path.as_ref(),
             signer,
-            0,
+            Some(0),
         )
     }
 
@@ -1099,7 +1099,7 @@ impl Builder {
         asset_path: P,
         fragment_paths: &Vec<std::path::PathBuf>,
         output_path: P,
-        window_size: usize,
+        window_size: Option<usize>,
     ))]
     #[cfg(feature = "file_io")]
     pub fn sign_live_bmff<P>(
@@ -1108,7 +1108,7 @@ impl Builder {
         asset_path: P,
         fragment_paths: &Vec<std::path::PathBuf>,
         output_path: P,
-        window_size: usize,
+        window_size: Option<usize>,
     ) -> Result<()>
     where
         P: AsRef<Path>,
@@ -1152,70 +1152,6 @@ impl Builder {
                     signer,
                     window_size,
                 )
-                .await
-        }
-    }
-
-    /// Sign a partially completed fragmented BMFF live stream.
-    ///
-    /// This will use a rolling hash for signing instead of
-    /// a Merkle Tree as VoD is using.
-    ///
-    /// # Arguments
-    /// * `signer` - The signer to use.
-    /// * `asset_path` - The path to the primary asset file, the
-    ///     init file. After the first fragment this file should
-    ///     have a C2PA manifest.
-    /// * `previous_fragment` - The path to the previous fragment
-    ///     of the live stream. Needed to continue the rolling
-    ///     hash.
-    /// * `new_fragment` - The path to the new fragment to be
-    ///     added to the rolling hash.
-    /// * `output_dir` - The path to the output signed files
-    ///     directory.
-    #[async_generic(async_signature(
-        &mut self,
-        signer: &dyn AsyncSigner,
-        asset_path: P1,
-        new_fragment: P2,
-        output_dir: P3,
-    ))]
-    #[cfg(feature = "file_io")]
-    pub fn sign_live_bmff_rolling_hash<P1, P2, P3>(
-        &mut self,
-        signer: &dyn Signer,
-        asset_path: P1,
-        new_fragment: P2,
-        output_dir: P3,
-    ) -> Result<()>
-    where
-        P1: AsRef<Path>,
-        P2: AsRef<Path>,
-        P3: AsRef<Path>,
-    {
-        // ugly hack to skip the error of already existing output from
-        // `set_asset_from_dest`
-        let path = output_dir.as_ref();
-        if !path.exists() {
-            std::fs::create_dir_all(&output_dir)?;
-        }
-        self.definition.format =
-            crate::format_from_path(&asset_path).ok_or(crate::Error::UnsupportedType)?;
-        self.definition.instance_id = format!("xmp:iid:{}", Uuid::new_v4());
-        if self.definition.title.is_none() {
-            if let Some(title) = path.file_name() {
-                self.definition.title = Some(title.to_string_lossy().to_string());
-            }
-        }
-
-        // convert the manifest to a store
-        let mut store = self.to_store()?;
-
-        if _sync {
-            store.save_to_bmff_rolling_hash(asset_path, new_fragment, output_dir, signer)
-        } else {
-            store
-                .save_to_bmff_rolling_hash_async(asset_path, new_fragment, output_dir, signer)
                 .await
         }
     }
@@ -1272,15 +1208,15 @@ mod tests {
     use wasm_bindgen_test::*;
 
     use super::*;
-    #[cfg(any(feature = "openssl_sign", target_arch = "wasm32"))]
-    use crate::{assertions::BoxHash, asset_handlers::jpeg_io::JpegIO};
     use crate::{
-        assertions::RollingHash,
+        assertions::BmffHash,
         hash_stream_by_alg,
         utils::{test::write_jpeg_placeholder_stream, test_signer::test_signer},
         validation_results::ValidationState,
         Reader,
     };
+    #[cfg(any(feature = "openssl_sign", target_arch = "wasm32"))]
+    use crate::{assertions::BoxHash, asset_handlers::jpeg_io::JpegIO};
 
     #[cfg(target_arch = "wasm32")]
     wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
@@ -2073,6 +2009,7 @@ mod tests {
         let signed_init = format!("{base}/signed/segment_init.m4s");
         let output = format!("{base}/signed");
         std::fs::remove_dir_all(&output).unwrap();
+        let output = output + "/segment_init.m4s";
 
         let signer = crate::utils::test_signer::test_signer(SigningAlg::Ed25519);
         let mut builder = Builder::from_json(&manifest_json()).unwrap();
@@ -2088,23 +2025,23 @@ mod tests {
             let signed_frag = format!("{base}/signed/segment_{i:09}.m4s");
 
             builder
-                .sign_live_bmff_rolling_hash(signer.as_ref(), &init, frag, &output)
+                .sign_live_bmff(signer.as_ref(), &init, &vec![frag.into()], &output, None)
+                .unwrap();
+
+            let mut init_fp = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&signed_init)
+                .unwrap();
+            let mut frag_fp = std::fs::OpenOptions::new()
+                .read(true)
+                .open(&signed_frag)
                 .unwrap();
 
             // validate fragment
             let reader = if i == 1 {
-                let mut init_fp = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&signed_init)
-                    .unwrap();
-                let mut frag1_fp = std::fs::OpenOptions::new()
-                    .read(true)
-                    .open(&signed_frag)
-                    .unwrap();
-
-                Reader::from_fragment("m4s", &mut init_fp, &mut frag1_fp).unwrap()
+                Reader::from_fragment("m4s", &mut init_fp, &mut frag_fp).unwrap()
             } else {
-                Reader::from_rolling_hash("m4s", &signed_init, &signed_frag, &rolling_hash).unwrap()
+                Reader::from_rolling_hash("m4s", &mut init_fp, &mut frag_fp, &rolling_hash).unwrap()
             };
 
             // check if all went well
@@ -2123,7 +2060,9 @@ mod tests {
             rolling_hash = reader
                 .active_manifest()
                 .unwrap()
-                .find_assertion::<RollingHash>(crate::assertions::labels::ROLLING_HASH)
+                .find_assertion::<BmffHash>(crate::assertions::labels::BMFF_HASH_2)
+                .unwrap()
+                .rolling_hash()
                 .unwrap()
                 .rolling_hash()
                 .cloned()
@@ -2137,7 +2076,7 @@ mod tests {
             let frag = format!("{base}/fragments/segment_{i:09}.m4s");
 
             builder
-                .sign_live_bmff_rolling_hash(signer.as_ref(), &init, frag, &output)
+                .sign_live_bmff(signer.as_ref(), &init, &vec![frag.into()], &output, None)
                 .unwrap();
         }
 
@@ -2156,18 +2095,21 @@ mod tests {
         let rh = reader
             .active_manifest()
             .unwrap()
-            .find_assertion::<RollingHash>(crate::assertions::labels::ROLLING_HASH)
+            .find_assertion::<BmffHash>(crate::assertions::labels::BMFF_HASH_2)
             .unwrap();
 
-        let rolling_hash = rh.rolling_hash().unwrap();
-        let previous_hash = rh.previous_hash().unwrap();
+        let rolling_hash = rh.rolling_hash().unwrap().rolling_hash().unwrap();
+        let previous_hash = rh.rolling_hash().unwrap().previous_hash().unwrap();
 
         // validation from memory
-        let signed_frag = format!("{base}/signed/segment_{:09}.m4s", 2);
+        let mut signed_frag = std::fs::OpenOptions::new()
+            .read(true)
+            .open(format!("{base}/signed/segment_{:09}.m4s", 2))
+            .unwrap();
         let reader = Reader::from_rolling_hash_memory(
             "m4s",
-            signed_init,
-            signed_frag,
+            &mut init_fp,
+            &mut signed_frag,
             rolling_hash,
             previous_hash,
         )

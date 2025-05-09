@@ -54,10 +54,6 @@ pub const ASSERTION_DATAHASH_MATCH: &str = "assertion.dataHash.match";
 /// Any corresponding URL should point to a C2PA assertion.
 pub const ASSERTION_BMFFHASH_MATCH: &str = "assertion.bmffHash.match";
 
-/// Hash of a box-based asset matches the hash declared in RollingHash
-/// assertion.
-pub const ASSERTION_ROLLINGHASH_MATCH: &str = "assertion.rollingHash.match";
-
 /// Hash of a box-based asset matches the hash declared in the General Box
 /// Hash assertion.
 ///
@@ -258,10 +254,6 @@ pub const ASSERTION_DATAHASH_MISMATCH: &str = "assertion.dataHash.mismatch";
 ///
 /// Any corresponding URL should point to a C2PA assertion.
 pub const ASSERTION_BMFFHASH_MISMATCH: &str = "assertion.bmffHash.mismatch";
-
-/// Hash of a box-based asset does not match the hash declared in RollingHash
-/// assertion.
-pub const ASSERTION_ROLLINGHASH_MISMATCH: &str = "assertion.rollingHash.mismatch";
 
 /// The hash of a box-based asset does not match the hash declared
 /// in the General Boxes hash assertion.

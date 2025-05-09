@@ -397,11 +397,12 @@ impl LiveSigner {
 
         // Rolling Hash signing
 
-        let UriInfo { rep_id, index: _ } = self.regex.uri(&uri)?;
+        // let UriInfo { rep_id, index: _ } = self.regex.uri(&uri)?;
 
         let builder = self.c2pa.clone();
         let (init, fragment) = self.rolling_hash_input_paths(name, &uri)?;
-        let output_dir = self.local_path(name, rep_id.to_string(), Some(ForwardType::RollingHash));
+        // let output_dir = self.local_path(name, rep_id.to_string(), Some(ForwardType::RollingHash));
+        let output = self.output(name, &init, ForwardType::RollingHash)?;
         let signed_forward = self.rolling_hash_forward_urls(name, &init, &fragment)?;
         let client = self.sync_client.clone();
         thread::Builder::new()
@@ -412,7 +413,7 @@ impl LiveSigner {
 
                 // sign
                 if let Err(err) =
-                    c2pa.sign_live_bmff_rolling_hash(signer.as_ref(), init, fragment, &output_dir)
+                    c2pa.sign_live_bmff(signer.as_ref(), init, &vec![fragment], output, None)
                 {
                     log::error!("Sign: {err}");
                     bail!("Sign: {err}")
@@ -446,9 +447,13 @@ impl LiveSigner {
                 }
 
                 // sign
-                if let Err(err) =
-                    c2pa.sign_live_bmff(signer.as_ref(), init, &fragments, output, window_size)
-                {
+                if let Err(err) = c2pa.sign_live_bmff(
+                    signer.as_ref(),
+                    init,
+                    &fragments,
+                    output,
+                    Some(window_size),
+                ) {
                     log::error!("Sign: {err}");
                     bail!("Sign: {err}")
                 }
