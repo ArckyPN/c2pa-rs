@@ -308,39 +308,6 @@ impl Reader {
         })
     }
 
-    #[async_generic()]
-    #[cfg(feature = "file_io")]
-    pub fn from_rolling_hash_hack<P1, P2>(format: &str, stream: P1, fragment: P2) -> Result<Self>
-    where
-        P1: AsRef<std::path::Path>,
-        P2: AsRef<std::path::Path>,
-    {
-        let mut validation_log = DetailedStatusTracker::default();
-        let manifest_bytes = Store::load_jumbf_from_path(stream.as_ref())?;
-        let store = Store::from_jumbf(&manifest_bytes, &mut validation_log)?;
-
-        let mut init_fp = std::fs::OpenOptions::new().read(true).open(stream)?;
-        let mut fragment_fp = std::fs::OpenOptions::new().read(true).open(fragment)?;
-
-        let verify = get_settings_value::<bool>("verify.verify_after_reading")?; // defaults to true
-                                                                                 // verify the store
-        if verify {
-            let mut fragment =
-                ClaimAssetData::StreamFragment(&mut init_fp, &mut fragment_fp, format);
-            if _sync {
-                // verify store and claims
-                Store::verify_store(&store, &mut fragment, &mut validation_log)
-            } else {
-                // verify store and claims
-                Store::verify_store_async(&store, &mut fragment, &mut validation_log).await
-            }?;
-        };
-
-        Ok(Self {
-            manifest_store: ManifestStore::from_store(store, &validation_log),
-        })
-    }
-
     #[cfg(feature = "file_io")]
     /// Loads a [`Reader`]` from an initial segment and fragments.  This
     /// would be used to load and validate fragmented MP4 files that span
