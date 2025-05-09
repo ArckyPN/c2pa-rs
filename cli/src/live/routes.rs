@@ -1,5 +1,6 @@
 use std::{io::Write, path::PathBuf};
 
+use c2pa_crypto::base64;
 use rocket::{
     data::ByteUnit, http::Status, serde::json::Json, tokio::io::AsyncReadExt, Data, State,
 };
@@ -105,10 +106,16 @@ pub(crate) async fn delete_ingest(
     Ok(())
 }
 
-#[rocket::post("/?<rep>&<name>", data = "<body>")]
+fn unscramble_base64(s: &str) -> String {
+    s.replace(".", "+").replace("_", "/").replace("-", "=")
+}
+
+#[rocket::post("/?<rep>&<name>&<rolling_hash>&<previous_hash>", data = "<body>")]
 pub(crate) async fn verify_rolling_hash(
     name: &str,
     rep: u8,
+    rolling_hash: &str,
+    previous_hash: &str,
     body: Data<'_>,
     state: &State<LiveSigner>,
 ) -> Result<String> {
@@ -118,14 +125,33 @@ pub(crate) async fn verify_rolling_hash(
 
     let dir = state.local(&format!("{name}_rolling-hash"), rep);
     let init_path = log_err!(find_init(dir), "find init")?;
+    let mut init_fp = log_err!(
+        std::fs::OpenOptions::new().read(true).open(init_path),
+        "open init file"
+    )?;
     let mut fragment_fp = log_err!(tempfile::NamedTempFile::new(), "create fragment tempfile")?;
     log_err!(
         fragment_fp.write_all(&fragment),
         "write fragment to tempfile"
     )?;
 
+    let rolling_hash = log_err!(
+        base64::decode(&unscramble_base64(rolling_hash)),
+        "decode rolling hash"
+    )?;
+    let previous_hash = log_err!(
+        base64::decode(&unscramble_base64(previous_hash)),
+        "decode previous hash"
+    )?;
+
     let verifier = log_err!(
-        c2pa::Reader::from_rolling_hash_hack("m4s", &init_path, fragment_fp.path()),
+        c2pa::Reader::from_rolling_hash_memory(
+            "m4s",
+            &mut init_fp,
+            &mut fragment_fp,
+            &rolling_hash,
+            &previous_hash
+        ),
         "verify rolling hash hack"
     )?;
 
