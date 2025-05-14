@@ -1307,6 +1307,7 @@ impl Manifest {
             fragment_paths,
             output_path.as_ref(),
             signer,
+            Some(0),
         )
     }
 

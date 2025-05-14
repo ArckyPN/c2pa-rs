@@ -308,6 +308,19 @@ impl Reader {
         })
     }
 
+    #[async_generic()]
+    #[cfg(feature = "file_io")]
+    pub fn from_rolling_hash_memory_hack(
+        mut fragment: impl Read + Seek + Send,
+        rolling_hash: &[u8],
+        previous_hash: &[u8],
+    ) -> bool {
+        let bmff_hash = crate::assertions::BmffHash::new("", "sha256", None);
+        bmff_hash
+            .verify_fragment_memory(&mut fragment, Some("sha256"), rolling_hash, previous_hash)
+            .is_ok()
+    }
+
     #[cfg(feature = "file_io")]
     /// Loads a [`Reader`]` from an initial segment and fragments.  This
     /// would be used to load and validate fragmented MP4 files that span

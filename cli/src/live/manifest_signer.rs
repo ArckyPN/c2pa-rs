@@ -73,52 +73,52 @@ impl ManifestCache {
     where
         P: AsRef<Path>,
     {
-        let UriInfo { rep_id, index: _ } = self.re.uri(&init)?;
+        // let UriInfo { rep_id, index: _ } = self.re.uri(&init)?;
 
-        if let Some((mpd, _)) = self.mpd.write().await.as_mut() {
-            mpd.publishTime = Some(Self::now()?);
-            mpd.suggestedPresentationDelay = Some(Duration::from_secs(5));
+        // if let Some((mpd, _)) = self.mpd.write().await.as_mut() {
+        //     mpd.publishTime = Some(Self::now()?);
+        //     mpd.suggestedPresentationDelay = Some(Duration::from_secs(5));
 
-            for period in mpd.periods.iter_mut() {
-                for adaptation in period.adaptations.iter_mut() {
-                    for representation in adaptation.representations.iter_mut() {
-                        // TODO alternatively better to use InbandEventStream to be standard conform
-                        let Some(id) = &representation.id else {
-                            unreachable!("RepID is always present in this context")
-                        };
-                        if rep_id == id.parse::<u8>()? {
-                            let Some(seg_list) = representation.SegmentList.as_mut() else {
-                                unreachable!("SegmentList is always present in this context")
-                            };
+        //     for period in mpd.periods.iter_mut() {
+        //         for adaptation in period.adaptations.iter_mut() {
+        //             for representation in adaptation.representations.iter_mut() {
+        //                 // TODO alternatively better to use InbandEventStream to be standard conform
+        //                 let Some(id) = &representation.id else {
+        //                     unreachable!("RepID is always present in this context")
+        //                 };
+        //                 if rep_id == id.parse::<u8>()? {
+        //                     let Some(seg_list) = representation.SegmentList.as_mut() else {
+        //                         unreachable!("SegmentList is always present in this context")
+        //                     };
 
-                            let url = Self::path_to_source_url(&init)?;
-                            let c2pa = base64::encode(&extract_c2pa_box(&init)?);
+        //                     let url = Self::path_to_source_url(&init)?;
+        //                     let c2pa = base64::encode(&extract_c2pa_box(&init)?);
 
-                            seg_list.Initialization = Some(Initialization {
-                                sourceURL: Some(url),
-                                c2pa: Some(c2pa),
-                                ..Default::default()
-                            });
+        //                     seg_list.Initialization = Some(Initialization {
+        //                         sourceURL: Some(url),
+        //                         c2pa: Some(c2pa),
+        //                         ..Default::default()
+        //                     });
 
-                            let mut seg_urls = Vec::with_capacity(paths.len());
+        //                     let mut seg_urls = Vec::with_capacity(paths.len());
 
-                            for path in paths {
-                                let media = Self::path_to_source_url(path)?;
-                                let c2pa = base64::encode(&extract_c2pa_box(path)?);
+        //                     for path in paths {
+        //                         let media = Self::path_to_source_url(path)?;
+        //                         let c2pa = base64::encode(&extract_c2pa_box(path)?);
 
-                                seg_urls.push(SegmentURL {
-                                    media: Some(media),
-                                    c2pa: Some(c2pa),
-                                    ..Default::default()
-                                });
-                            }
+        //                         seg_urls.push(SegmentURL {
+        //                             media: Some(media),
+        //                             c2pa: Some(c2pa),
+        //                             ..Default::default()
+        //                         });
+        //                     }
 
-                            seg_list.segment_urls = seg_urls;
-                        }
-                    }
-                }
-            }
-        }
+        //                     seg_list.segment_urls = seg_urls;
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
         Ok(())
     }
@@ -204,29 +204,30 @@ impl ManifestCache {
     /// Returns the serialized MPD + URL and resets the MPD
     /// for the next segments.
     pub async fn mpd_ready(&self) -> Option<(String, Url)> {
-        let lock = self.mpd.read().await;
-        let (mpd, url) = lock.to_owned()?;
-        for period in mpd.periods.iter() {
-            for adaptation in period.adaptations.iter() {
-                for representation in adaptation.representations.iter() {
-                    let seg_list = representation.SegmentList.as_ref()?;
+        //     let lock = self.mpd.read().await;
+        //     let (mpd, url) = lock.to_owned()?;
+        //     for period in mpd.periods.iter() {
+        //         for adaptation in period.adaptations.iter() {
+        //             for representation in adaptation.representations.iter() {
+        //                 let seg_list = representation.SegmentList.as_ref()?;
 
-                    seg_list.Initialization.as_ref()?.c2pa.as_ref()?;
-                    for segment in seg_list.segment_urls.iter() {
-                        segment.c2pa.as_ref()?;
-                    }
-                }
-            }
-        }
+        //                 seg_list.Initialization.as_ref()?.c2pa.as_ref()?;
+        //                 for segment in seg_list.segment_urls.iter() {
+        //                     segment.c2pa.as_ref()?;
+        //                 }
+        //             }
+        //         }
+        //     }
 
-        // MPD is ready, reset and return payload
-        let payload = mpd.to_string();
+        //     // MPD is ready, reset and return payload
+        //     let payload = mpd.to_string();
 
-        // explicitly drop the lock to prevent deadlock
-        drop(lock);
-        self.reset_mpd().await;
+        //     // explicitly drop the lock to prevent deadlock
+        //     drop(lock);
+        //     self.reset_mpd().await;
 
-        Some((payload, url))
+        //     Some((payload, url))
+        None
     }
 
     /// Removes all Initialization information and

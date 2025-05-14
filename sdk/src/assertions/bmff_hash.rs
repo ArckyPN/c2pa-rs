@@ -1154,6 +1154,8 @@ impl BmffHash {
             },
         };
 
+        // TODO parse Exclusion from the Fragment itself
+
         // hash fragment stream
         let exclusions = bmff_to_jumbf_exclusions(fragment_stream, &self.exclusions, true)?;
         let frag_hash = hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
