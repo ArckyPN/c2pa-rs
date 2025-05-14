@@ -26,10 +26,20 @@ use crate::log::LogKind;
 /// Any corresponding URL should point to a C2PA claim signature box.
 pub const CLAIM_SIGNATURE_VALIDATED: &str = "claimSignature.validated";
 
+/// The claims signing certificate was valid at the time of signing.
+///
+/// Any corresponding URL should point to a C2PA claim box.
+pub const CLAIM_SIGNATURE_INSIDE_VALIDITY: &str = "claimSignature.insideValidity";
+
 /// The signing credential is listed on the validator's trust list.
 ///
 /// Any corresponding URL should point to a C2PA claim signature box.
 pub const SIGNING_CREDENTIAL_TRUSTED: &str = "signingCredential.trusted";
+
+/// The signing credential for the manifest has not been revoked:
+///
+/// Any corresponding URL should point to a C2PA claim
+pub const SIGNING_CREDENTIAL_NOT_REVOKED: &str = "signingCredential.ocsp.notRevoked";
 
 /// The time-stamp credential is listed on the validator's trust list.
 ///
@@ -181,6 +191,12 @@ pub const TIMESTAMP_UNTRUSTED: &str = "timeStamp.untrusted";
 /// Any corresponding URL should point to a C2PA claim signature box.
 pub const TIMESTAMP_OUTSIDE_VALIDITY: &str = "timeStamp.outsideValidity";
 
+/// The time-stamp response included in the claim signature header is not
+/// properly formed, as per RFC 3161
+///
+/// Any corresponding URL should point to a C2PA claim signature box.
+pub const TIMESTAMP_MALFORMED: &str = "timeStamp.malformed";
+
 /// The hash of the the referenced assertion in the manifest does not
 /// match the corresponding hash in the assertion's hashed URI in the claim.
 ///
@@ -265,7 +281,7 @@ pub const ASSERTION_BOXHASH_MISMATCH: &str = "assertion.boxesHash.mismatch";
 /// for the General Boxes hash assertion.
 ///
 /// Any corresponding URL should point to a C2PA assertion.
-pub const ASSERTION_BOXHASH_UNKNOWN: &str = "assertion.boxesHash.";
+pub const ASSERTION_BOXHASH_UNKNOWN: &str = "assertion.boxesHash.unknownBox";
 
 /// A hard binding assertion is in a cloud data assertion.
 ///
@@ -319,9 +335,10 @@ pub fn log_kind(status_code: &str) -> LogKind {
         | ASSERTION_BMFFHASH_MATCH
         | ASSERTION_ACCESSIBLE
         | ASSERTION_BOXHASH_MATCH => LogKind::Success,
-        TIMESTAMP_UNTRUSTED | TIMESTAMP_OUTSIDE_VALIDITY | TIMESTAMP_MISMATCH => {
-            LogKind::Informational
-        }
+        TIMESTAMP_UNTRUSTED
+        | TIMESTAMP_OUTSIDE_VALIDITY
+        | TIMESTAMP_MISMATCH
+        | TIMESTAMP_MALFORMED => LogKind::Informational,
         _ => LogKind::Failure,
     }
 }

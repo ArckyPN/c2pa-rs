@@ -17,7 +17,21 @@ use std::slice::Iter;
 
 use async_trait::async_trait;
 
+// Publish PostValidator trait from this module.
+pub use crate::reader::{AsyncPostValidator, PostValidator};
 use crate::{hashed_uri::HashedUri, Result};
+
+/// The type of content that can be returned by a [`DynamicAssertion`] content call.
+pub enum DynamicAssertionContent {
+    /// The assertion is a CBOR-encoded binary blob.
+    Cbor(Vec<u8>),
+
+    /// The assertion is a JSON-encoded string.
+    Json(String),
+
+    /// The assertion is a binary blob with a content type.
+    Binary(String, Vec<u8>),
+}
 
 /// A `DynamicAssertion` is an assertion that has the ability to adjust
 /// its content based on other assertions within the overall [`Manifest`].
@@ -41,7 +55,7 @@ pub trait DynamicAssertion {
     /// assertion).
     ///
     /// [`Builder`]: crate::Builder
-    fn reserve_size(&self) -> usize;
+    fn reserve_size(&self) -> Result<usize>;
 
     /// Return the final assertion content.
     ///
@@ -60,8 +74,8 @@ pub trait DynamicAssertion {
         &self,
         label: &str,
         size: Option<usize>,
-        claim: &PreliminaryClaim,
-    ) -> Result<Vec<u8>>;
+        claim: &PartialClaim,
+    ) -> Result<DynamicAssertionContent>;
 }
 
 /// An `AsyncDynamicAssertion` is an assertion that has the ability
@@ -73,7 +87,7 @@ pub trait DynamicAssertion {
 /// [`Manifest`]: crate::Manifest
 #[cfg(not(target_arch = "wasm32"))]
 #[async_trait]
-pub trait AsyncDynamicAssertion: Sync {
+pub trait AsyncDynamicAssertion: Sync + Send {
     /// Return the preferred label for this assertion.
     ///
     /// Note that the label may be adjusted in case multiple assertions
@@ -89,7 +103,7 @@ pub trait AsyncDynamicAssertion: Sync {
     /// assertion).
     ///
     /// [`Builder`]: crate::Builder
-    fn reserve_size(&self) -> usize;
+    fn reserve_size(&self) -> Result<usize>;
 
     /// Return the final assertion content.
     ///
@@ -108,8 +122,8 @@ pub trait AsyncDynamicAssertion: Sync {
         &self,
         label: &str,
         size: Option<usize>,
-        claim: &PreliminaryClaim,
-    ) -> Result<Vec<u8>>;
+        claim: &PartialClaim,
+    ) -> Result<DynamicAssertionContent>;
 }
 
 /// An `AsyncDynamicAssertion` is an assertion that has the ability
@@ -137,7 +151,7 @@ pub trait AsyncDynamicAssertion {
     /// assertion).
     ///
     /// [`Builder`]: crate::Builder
-    fn reserve_size(&self) -> usize;
+    fn reserve_size(&self) -> Result<usize>;
 
     /// Return the final assertion content.
     ///
@@ -156,18 +170,18 @@ pub trait AsyncDynamicAssertion {
         &self,
         label: &str,
         size: Option<usize>,
-        claim: &PreliminaryClaim,
-    ) -> Result<Vec<u8>>;
+        claim: &PartialClaim,
+    ) -> Result<DynamicAssertionContent>;
 }
 
 /// Describes information from the preliminary C2PA Claim that may
 /// be helpful in constructing the final content of a [`AsyncDynamicAssertion`].
 #[derive(Debug, Default, Eq, PartialEq)]
-pub struct PreliminaryClaim {
+pub struct PartialClaim {
     assertion_uris: Vec<HashedUri>,
 }
 
-impl PreliminaryClaim {
+impl PartialClaim {
     /// Return an iterator over the assertions in this Claim.
     pub fn assertions(&self) -> Iter<HashedUri> {
         self.assertion_uris.iter()

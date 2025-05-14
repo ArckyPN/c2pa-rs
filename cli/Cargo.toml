@@ -1,7 +1,7 @@
 [package]
 name = "c2patool"
 default-run = "c2patool"
-version = "0.13.1"
+version = "0.17.0"
 description = "Tool for displaying and creating C2PA manifests."
 authors = [
     "Gavin Peacock <gpeacock@adobe.com>",
@@ -22,25 +22,23 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(test)'] }
 [dependencies]
 anyhow = "1.0"
 atree = "0.5.2"
-c2pa = { path = "../sdk", version = "0.45.1", features = [
+c2pa = { path = "../sdk", version = "0.51.0", features = [
 	"fetch_remote_manifests",
 	"file_io",
 	"add_thumbnails",
 	"pdf"
 ] }
-c2pa-crypto = { path = "../internal/crypto", version = "0.6.1" }
+c2pa-crypto = { path = "../internal/crypto", version = "0.9.0" }
 clap = { version = "4.5.10", features = ["derive", "env"] }
-env_logger = "0.11.4"
+env_logger = "0.11.7"
 glob = "0.3.1"
 log = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_derive = "1.0"
 serde_json = "1.0"
-tempfile = "3.3"
+tempfile = "3.20"
 treeline = "0.1.0"
 pem = "3.0.3"
-openssl = { version = "0.10.61", features = ["vendored"] }
-reqwest = { version = "0.12.4", features = ["blocking"] }
 url = "2.5.0"
 
 # Live
@@ -51,14 +49,25 @@ dash-mpd = { version = "0.18.2" }
 itertools = "0.8.0"
 m3u8-rs = { version = "6.0.0", path = "../../m3u8-rs"}
 regex = "1.11.1"
+reqwest = { version = "0.12.4", features = ["blocking"] }
 rocket = { version = "0.5.1", features = ["json"] }
 rocket_cors = "0.6.0"
 
+[target.'cfg(not(target_os = "wasi"))'.dependencies]
+async-std = { version = "1.12", features = ["attributes"] }
+tokio = { version = "1.44.2", features = ["rt", "rt-multi-thread"] }
+
+[target.'cfg(target_os = "wasi")'.dependencies]
+wasi = "0.14"
+wstd = "0.5"
+
 [dev-dependencies]
+mockall = "0.13.0"
+
+[target.'cfg(not(target_os = "wasi"))'.dev-dependencies]
 assert_cmd = "2.0.14"
 httpmock = "0.7.0"
 predicates = "3.1"
-mockall = "0.13.0"
 
 [package.metadata.binstall]
 # Use defaults

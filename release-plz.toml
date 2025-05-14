@@ -37,7 +37,7 @@ dependencies_update = true
 features_always_increment_minor = true
 pr_labels = ["release"]
 release_always = false
-release_commits = "^(feat|fix|update|doc)[(:]"
+release_commits = "^(feat|fix|docs|perf|refactor|revert|test|update)[(:]"
 
 [[package]]
 name = "c2pa"
@@ -53,10 +53,12 @@ name = "c2pa-status-tracker"
 name = "c2pa-crypto"
 
 [[package]]
-name = "cawg-identity"
+name = "c2patool"
 
 [[package]]
-name = "c2patool"
+name = "c2pa-c"
+publish = false
+release = false
 
 [[package]]
 name = "export_schema"

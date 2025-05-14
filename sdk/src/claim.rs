@@ -13,7 +13,7 @@
 
 #[cfg(feature = "file_io")]
 use std::path::Path;
-use std::{collections::HashMap, fmt};
+use std::{borrow::Cow, collections::HashMap, fmt};
 
 use async_generic::async_generic;
 use c2pa_crypto::{
@@ -21,7 +21,7 @@ use c2pa_crypto::{
     cose::{parse_cose_sign1, CertificateInfo, CertificateTrustPolicy, OcspFetchPolicy},
     ocsp::OcspResponse,
 };
-use c2pa_status_tracker::{log_item, OneShotStatusTracker, StatusTracker};
+use c2pa_status_tracker::{log_item, ErrorBehavior, StatusTracker};
 use chrono::{DateTime, Utc};
 use serde::{ser::SerializeStruct, Deserialize, Serialize, Serializer};
 use serde_json::{json, Map, Value};
@@ -63,12 +63,12 @@ use crate::{
 const BUILD_HASH_ALG: &str = "sha256";
 const BUILD_VER_SUPPORT: usize = 2;
 
-/// JSON structure representing an Assertion reference in a Claim's "assertions" list
+/// JSON structure representing an Assertion reference in a Claim's "assertions" list.
 use HashedUri as C2PAAssertion;
 
 const GH_FULL_VERSION_LIST: &str = "Sec-CH-UA-Full-Version-List";
 const GH_UA: &str = "Sec-CH-UA";
-const C2PA_NAMESPACE_V2: &str = "urn:c2pa:";
+const C2PA_NAMESPACE_V2: &str = "urn:c2pa";
 const C2PA_NAMESPACE_V1: &str = "urn:uuid";
 
 static _V2_SPEC_DEPRECATED_ASSERTIONS: [&str; 4] = [
@@ -81,6 +81,7 @@ static _V2_SPEC_DEPRECATED_ASSERTIONS: [&str; 4] = [
 // Enum to encapsulate the data type of the source asset.  This simplifies
 // having different implementations for functions as a single entry point can be
 // used to handle different data types.
+#[allow(dead_code)] // Bytes and third param in StreamFragment not used without v1_api feature
 pub enum ClaimAssetData<'a> {
     #[cfg(feature = "file_io")]
     Path(&'a Path),
@@ -210,6 +211,7 @@ impl fmt::Debug for ClaimAssertion {
 // Claim field names
 const CLAIM_GENERATOR_F: &str = "claim_generator";
 const CLAIM_GENERATOR_INFO_F: &str = "claim_generator_info";
+const CLAIM_GENERATOR_HINTS_F: &str = "claim_generator_hints";
 const SIGNATURE_F: &str = "signature";
 const ASSERTIONS_F: &str = "assertions";
 const DC_FORMAT_F: &str = "dc:format";
@@ -426,23 +428,54 @@ impl Claim {
         user_guid: S,
         claim_version: usize,
     ) -> Result<Self> {
-        let ug: String = user_guid.into();
+        let mparts = manifest_label_to_parts(&user_guid.into())
+            .ok_or(Error::BadParam("invalid Claim GUID".into()))?;
+
+        if claim_version == 1 && !mparts.is_v1 || claim_version > 1 && mparts.is_v1 {
+            return Err(Error::BadParam("invalid Claim GUID".into()));
+        }
+
+        let ug = &mparts.guid;
         let uuid =
-            Uuid::try_parse(&ug).map_err(|_e| Error::BadParam("invalid Claim GUID".into()))?;
+            Uuid::try_parse(ug).map_err(|_e| Error::BadParam("invalid Claim GUID".into()))?;
         match uuid.get_version() {
             Some(uuid::Version::Random) => (),
             _ => return Err(Error::BadParam("invalid Claim GUID".into())),
         }
-        let label = if claim_version == 1 {
-            uuid.urn()
-                .encode_lower(&mut Uuid::encode_buffer())
-                .to_string()
-        } else {
-            format!(
-                "{}:{}",
-                C2PA_NAMESPACE_V2,
-                uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer())
-            )
+
+        let label = match mparts.vendor {
+            Some(v) => {
+                if mparts.is_v1 {
+                    format!(
+                        "{}:{}:{}",
+                        v.to_lowercase(),
+                        C2PA_NAMESPACE_V1,
+                        uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer())
+                    )
+                } else {
+                    format!(
+                        "{}:{}:{}",
+                        C2PA_NAMESPACE_V2,
+                        uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer()),
+                        v.to_lowercase()
+                    )
+                }
+            }
+            None => {
+                if mparts.is_v1 {
+                    format!(
+                        "{}:{}",
+                        C2PA_NAMESPACE_V1,
+                        uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer())
+                    )
+                } else {
+                    format!(
+                        "{}:{}",
+                        C2PA_NAMESPACE_V2,
+                        uuid.hyphenated().encode_lower(&mut Uuid::encode_buffer())
+                    )
+                }
+            }
         };
 
         Ok(Claim {
@@ -499,6 +532,7 @@ impl Claim {
         if claim_version == 1 {
             /* Claim V1 fields
             "claim_generator": tstr,
+            "claim_generator_hints",
             "claim_generator_info": [1* generator-info-map],
             "signature": jumbf-uri-type,
             "assertions": [1* $hashed-uri-map],
@@ -511,8 +545,9 @@ impl Claim {
             ? "metadata": $assertion-metadata-map,
             */
 
-            static V1_FIELDS: [&str; 11] = [
+            static V1_FIELDS: [&str; 12] = [
                 CLAIM_GENERATOR_F,
+                CLAIM_GENERATOR_HINTS_F,
                 CLAIM_GENERATOR_INFO_F,
                 SIGNATURE_F,
                 ASSERTIONS_F,
@@ -539,9 +574,6 @@ impl Claim {
 
             let claim_generator: String =
                 map_cbor_to_type(CLAIM_GENERATOR_F, &claim_value).ok_or(Error::ClaimDecoding)?;
-            let claim_generator_info: Vec<ClaimGeneratorInfo> =
-                map_cbor_to_type(CLAIM_GENERATOR_INFO_F, &claim_value).unwrap_or_default();
-
             let signature: String =
                 map_cbor_to_type(SIGNATURE_F, &claim_value).ok_or(Error::ClaimDecoding)?;
             let assertions: Vec<HashedUri> =
@@ -552,6 +584,10 @@ impl Claim {
                 map_cbor_to_type(INSTANCE_ID_F, &claim_value).ok_or(Error::ClaimDecoding)?;
 
             // optional V1 fields
+            let claim_generator_info: Option<Vec<ClaimGeneratorInfo>> =
+                map_cbor_to_type(CLAIM_GENERATOR_INFO_F, &claim_value);
+            let claim_generator_hints: Option<HashMap<String, Value>> =
+                map_cbor_to_type(CLAIM_GENERATOR_HINTS_F, &claim_value);
             let title: Option<String> = map_cbor_to_type(DC_TITLE_F, &claim_value);
             let redacted_assertions: Option<Vec<String>> =
                 map_cbor_to_type(REDACTED_ASSERTIONS_F, &claim_value);
@@ -572,7 +608,7 @@ impl Claim {
                 assertion_store: Vec::new(),
                 vc_store: Vec::new(),
                 claim_generator: Some(claim_generator),
-                claim_generator_info: Some(claim_generator_info),
+                claim_generator_info,
                 signature,
                 assertions,
                 original_bytes: Some(data.to_owned()),
@@ -580,7 +616,7 @@ impl Claim {
                 redacted_assertions,
                 alg,
                 alg_soft,
-                claim_generator_hints: None,
+                claim_generator_hints,
                 metadata,
                 data_boxes: Vec::new(),
                 claim_version,
@@ -1305,9 +1341,8 @@ impl Claim {
         salt_generator: &impl SaltGenerator,
     ) -> Result<C2PAAssertion> {
         if self.claim_version < 2 {
-            return Err(Error::VersionCompatibility(
-                "Claim version >= 2 required for gathered assertions".into(),
-            ));
+            // if this is called for a v1 claim then just treat is as a normal v1 assertion
+            return self.add_assertion_with_salt(assertion_builder, salt_generator);
         }
 
         match self.add_assertion_with_salt_impl(assertion_builder, salt_generator, false) {
@@ -1574,7 +1609,7 @@ impl Claim {
         // Replace existing hash with newly-calculated hash.
         f.update_hash(target_hash.to_vec());
 
-        // fix up ClaimV2 URI reference too
+        // fix up ClaimV2 URI reference for created assertions
         if let Some(f) = self
             .created_assertions
             .iter_mut()
@@ -1584,6 +1619,13 @@ impl Claim {
             f.update_hash(target_hash.to_vec());
         };
 
+        // fix up ClaimV2 URI reference for gathered assertions
+        if let Some(f) = self.gathered_assertions.as_mut().and_then(|ga| {
+            ga.iter_mut()
+                .find(|f| f.url().contains(&target_label) && vec_compare(&f.hash(), &original_hash))
+        }) {
+            f.update_hash(target_hash.to_vec())
+        };
         // clear original since content has changed
         self.clear_data();
 
@@ -1687,7 +1729,8 @@ impl Claim {
     pub fn signature_info(&self) -> Option<CertificateInfo> {
         let sig = self.signature_val();
         let data = self.data().ok()?;
-        let mut validation_log = OneShotStatusTracker::default();
+        let mut validation_log =
+            StatusTracker::with_error_behavior(ErrorBehavior::StopOnFirstError);
 
         if _sync {
             Some(get_signing_info(sig, &data, &mut validation_log))
@@ -1705,7 +1748,7 @@ impl Claim {
         is_provenance: bool,
         cert_check: bool,
         ctp: &CertificateTrustPolicy,
-        validation_log: &mut impl StatusTracker,
+        validation_log: &mut StatusTracker,
     ) -> Result<()> {
         // Parse COSE signed data (signature) and validate it.
         let sig = claim.signature_val().clone();
@@ -1732,8 +1775,45 @@ impl Claim {
         }
 
         // check certificate revocation
-        let sign1 = parse_cose_sign1(&sig, &data, validation_log)?;
-        check_ocsp_status_async(&sign1, &data, ctp, validation_log).await?;
+        let sign1 = parse_cose_sign1(&sig, &data, validation_log).inspect_err(|_e| {
+            // adjust the error info
+            if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                let mut new_li = li.clone();
+                new_li.label = Cow::from(claim.uri());
+                *li = new_li;
+            }
+        })?;
+        check_ocsp_status(&sign1, &data, ctp, validation_log)
+            .map(|v| {
+                // if a value contains the der response it has successfully returned a good OCSP response
+                if !v.ocsp_der.is_empty() {
+                    // so log the success status
+                    if v.revoked_at.is_none() {
+                        log_item!(
+                            claim.uri(),
+                            "claim signature OCSP value good",
+                            "verify_internal"
+                        )
+                        .validation_status(validation_status::SIGNING_CREDENTIAL_NOT_REVOKED)
+                        .success(validation_log);
+                    } else {
+                        // adjust the error info
+                        if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                            let mut new_li = li.clone();
+                            new_li.label = Cow::from(claim.uri());
+                            *li = new_li;
+                        }
+                    }
+                }
+            })
+            .inspect_err(|_e| {
+                // adjust the error info
+                if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                    let mut new_li = li.clone();
+                    new_li.label = Cow::from(claim.uri());
+                    *li = new_li;
+                }
+            })?;
 
         let verified = verify_cose_async(
             &sig,
@@ -1757,11 +1837,14 @@ impl Claim {
         is_provenance: bool,
         cert_check: bool,
         ctp: &CertificateTrustPolicy,
-        validation_log: &mut impl StatusTracker,
+        validation_log: &mut StatusTracker,
     ) -> Result<()> {
         // Parse COSE signed data (signature) and validate it.
         let sig = claim.signature_val();
         let additional_bytes: Vec<u8> = Vec::new();
+
+        // use the signature uri as the current uri while validating the signature info
+        validation_log.push_current_uri(claim.signature.clone());
 
         // make sure signature manifest if present points to this manifest
         let sig_box_err = match jumbf::labels::manifest_label_from_uri(&claim.signature) {
@@ -1785,8 +1868,45 @@ impl Claim {
         };
 
         // check certificate revocation
-        let sign1 = parse_cose_sign1(sig, data, validation_log)?;
-        check_ocsp_status(&sign1, data, ctp, validation_log)?;
+        let sign1 = parse_cose_sign1(sig, data, validation_log).inspect_err(|_e| {
+            // adjust the error info
+            if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                let mut new_li = li.clone();
+                new_li.label = Cow::from(claim.uri());
+                *li = new_li;
+            }
+        })?;
+        check_ocsp_status(&sign1, data, ctp, validation_log)
+            .map(|v| {
+                // if a value contains the der response it has successfully returned a good OCSP response
+                if !v.ocsp_der.is_empty() {
+                    // so log the success status
+                    if v.revoked_at.is_none() {
+                        log_item!(
+                            claim.uri(),
+                            "claim signature OCSP value good",
+                            "verify_internal"
+                        )
+                        .validation_status(validation_status::SIGNING_CREDENTIAL_NOT_REVOKED)
+                        .success(validation_log);
+                    } else {
+                        // adjust the error info
+                        if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                            let mut new_li = li.clone();
+                            new_li.label = Cow::from(claim.uri());
+                            *li = new_li;
+                        }
+                    }
+                }
+            })
+            .inspect_err(|_e| {
+                // adjust the error info
+                if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                    let mut new_li = li.clone();
+                    new_li.label = Cow::from(claim.uri());
+                    *li = new_li;
+                }
+            })?;
 
         let verified = verify_cose(
             sig,
@@ -1797,14 +1917,25 @@ impl Claim {
             validation_log,
         );
 
+        validation_log.pop_current_uri(); // back to the manifest url
+
         Claim::verify_internal(claim, asset_data, is_provenance, verified, validation_log)
+            .inspect_err(|_e| {
+                // adjust the error info
+                if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                    let mut new_li = li.clone();
+                    new_li.label = Cow::from(claim.uri());
+                    *li = new_li;
+                }
+            })
     }
 
     /// Get the signing certificate chain as PEM bytes
     pub fn get_cert_chain(&self) -> Result<Vec<u8>> {
         let sig = self.signature_val();
         let data = self.data()?;
-        let mut validation_log = OneShotStatusTracker::default();
+        let mut validation_log =
+            StatusTracker::with_error_behavior(ErrorBehavior::StopOnFirstError);
 
         let vi = get_signing_info(sig, &data, &mut validation_log);
 
@@ -1816,7 +1947,7 @@ impl Claim {
         asset_data: &mut ClaimAssetData<'_>,
         is_provenance: bool,
         verified: Result<CertificateInfo>,
-        validation_log: &mut impl StatusTracker,
+        validation_log: &mut StatusTracker,
     ) -> Result<()> {
         const UNNAMED: &str = "unnamed";
         let default_str = |s: &String| s.clone();
@@ -1832,6 +1963,28 @@ impl Claim {
                     .validation_status(validation_status::CLAIM_SIGNATURE_MISMATCH)
                     .failure(validation_log, Error::CoseSignature)?;
                 } else {
+                    // update the log_item details
+                    if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                        let mut new_li = li.clone();
+                        new_li.label = Cow::from(claim.uri());
+                        new_li.description = Cow::Borrowed("claim signature valid");
+
+                        if !is_provenance {
+                            new_li = new_li.set_ingredient_uri(claim.uri());
+                        }
+
+                        *li = new_li;
+                    }
+                    // signing cert has not expired
+                    log_item!(
+                        claim.signature_uri(),
+                        "claim signature valid",
+                        "verify_internal"
+                    )
+                    .validation_status(validation_status::CLAIM_SIGNATURE_INSIDE_VALIDITY)
+                    .success(validation_log);
+
+                    // add signature validated status
                     log_item!(
                         claim.signature_uri(),
                         "claim signature valid",
@@ -1842,13 +1995,25 @@ impl Claim {
                 }
             }
             Err(parse_err) => {
-                log_item!(
-                    claim.signature_uri(),
-                    "claim signature is not valid",
-                    "verify_internal"
-                )
-                .validation_status(validation_status::GENERAL_ERROR)
-                .failure(validation_log, parse_err)?;
+                // the lower level errors are logged validation_log
+                // continue on to catch other failures.
+
+                // adjust the error info
+                if let Some(li) = validation_log.logged_items_mut().last_mut() {
+                    let mut new_li = li.clone();
+                    new_li.label = Cow::from(claim.uri());
+
+                    *li = new_li;
+                } else {
+                    // handle case where lower level failed to log
+                    log_item!(
+                        claim.signature_uri(),
+                        "claim signature is not valid",
+                        "verify_internal"
+                    )
+                    .validation_status(validation_status::CLAIM_SIGNATURE_MISMATCH)
+                    .failure_no_throw(validation_log, parse_err);
+                }
             }
         };
 
@@ -2727,7 +2892,7 @@ pub(crate) fn check_ocsp_status(
     sign1: &coset::CoseSign1,
     data: &[u8],
     ctp: &CertificateTrustPolicy,
-    validation_log: &mut impl StatusTracker,
+    validation_log: &mut StatusTracker,
 ) -> Result<OcspResponse> {
     // Moved here instead of c2pa-crypto because of the dependency on settings.
 
@@ -2756,7 +2921,6 @@ pub(crate) fn check_ocsp_status(
     }
 }
 
-#[cfg(feature = "openssl")]
 #[cfg(test)]
 pub mod tests {
     #![allow(clippy::expect_used)]
@@ -2845,5 +3009,48 @@ pub mod tests {
         if let UriOrResource::HashedUri(r) = cgi[0].icon.as_ref().unwrap() {
             assert_eq!(r.hash(), b"hashed");
         }
+    }
+
+    #[test]
+    fn test_new_with_user_guid() {
+        // good v1
+        Claim::new_with_user_guid(
+            "claim_generator",
+            "acme:urn:uuid:3fad1ead-8ed5-44d0-873b-ea5f58adea82",
+            1,
+        )
+        .unwrap();
+
+        // good v2
+        Claim::new_with_user_guid(
+            "claim_generator",
+            "urn:c2pa:3fad1ead-8ed5-44d0-873b-ea5f58adea82:acme",
+            2,
+        )
+        .unwrap();
+
+        // feature incompatible
+        let c2 = Claim::new_with_user_guid(
+            "claim_generator",
+            "urn:c2pa:3fad1ead-8ed5-44d0-873b-ea5f58adea82:acme",
+            1,
+        );
+        assert!(c2.is_err());
+
+        // version incompatible
+        let c3 = Claim::new_with_user_guid(
+            "claim_generator",
+            "acme:urn:uuid:3fad1ead-8ed5-44d0-873b-ea5f58adea82",
+            2,
+        );
+        assert!(c3.is_err());
+
+        // malformed
+        let c4 = Claim::new_with_user_guid(
+            "claim_generator",
+            "urn:c2pa:3fad1ead-8ed5-44d0-873b-ea5f58adea82:acme",
+            1,
+        );
+        assert!(c4.is_err());
     }
 }

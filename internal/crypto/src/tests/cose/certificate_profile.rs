@@ -11,26 +11,29 @@
 // specific language governing permissions and limitations under
 // each license.
 
-use c2pa_status_tracker::{
-    validation_codes::SIGNING_CREDENTIAL_EXPIRED, DetailedStatusTracker, StatusTracker,
-};
-#[cfg(target_arch = "wasm32")]
+use c2pa_status_tracker::{validation_codes::SIGNING_CREDENTIAL_EXPIRED, StatusTracker};
+#[cfg(all(target_arch = "wasm32", not(target_os = "wasi")))]
 use wasm_bindgen_test::wasm_bindgen_test;
 use x509_parser::pem::Pem;
 
-use crate::cose::{check_certificate_profile, CertificateTrustPolicy};
+use crate::cose::{check_end_entity_certificate_profile, CertificateTrustPolicy};
 
 #[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(
+    all(target_arch = "wasm32", not(target_os = "wasi")),
+    wasm_bindgen_test
+)]
 fn expired_cert() {
     let ctp = CertificateTrustPolicy::default();
-    let mut validation_log = DetailedStatusTracker::default();
+    let mut validation_log = StatusTracker::default();
 
     let cert_der = x509_der_from_pem(include_bytes!(
         "../fixtures/cose/rsa-pss256_key-expired.pub"
     ));
 
-    assert!(check_certificate_profile(&cert_der, &ctp, &mut validation_log, None).is_err());
+    assert!(
+        check_end_entity_certificate_profile(&cert_der, &ctp, &mut validation_log, None).is_err()
+    );
 
     assert!(!validation_log.logged_items().is_empty());
 
@@ -41,21 +44,24 @@ fn expired_cert() {
 }
 
 #[test]
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen_test)]
+#[cfg_attr(
+    all(target_arch = "wasm32", not(target_os = "wasi")),
+    wasm_bindgen_test
+)]
 fn cert_algorithms() {
     let ctp = CertificateTrustPolicy::default();
 
-    let mut validation_log = DetailedStatusTracker::default();
+    let mut validation_log = StatusTracker::default();
 
     let es256_cert = x509_der_from_pem(include_bytes!("../fixtures/raw_signature/es256.pub"));
     let es384_cert = x509_der_from_pem(include_bytes!("../fixtures/raw_signature/es384.pub"));
     let es512_cert = x509_der_from_pem(include_bytes!("../fixtures/raw_signature/es512.pub"));
     let ps256_cert = x509_der_from_pem(include_bytes!("../fixtures/raw_signature/ps256.pub"));
 
-    check_certificate_profile(&es256_cert, &ctp, &mut validation_log, None).unwrap();
-    check_certificate_profile(&es384_cert, &ctp, &mut validation_log, None).unwrap();
-    check_certificate_profile(&es512_cert, &ctp, &mut validation_log, None).unwrap();
-    check_certificate_profile(&ps256_cert, &ctp, &mut validation_log, None).unwrap();
+    check_end_entity_certificate_profile(&es256_cert, &ctp, &mut validation_log, None).unwrap();
+    check_end_entity_certificate_profile(&es384_cert, &ctp, &mut validation_log, None).unwrap();
+    check_end_entity_certificate_profile(&es512_cert, &ctp, &mut validation_log, None).unwrap();
+    check_end_entity_certificate_profile(&ps256_cert, &ctp, &mut validation_log, None).unwrap();
 }
 
 fn x509_der_from_pem(cert_pem: &[u8]) -> Vec<u8> {

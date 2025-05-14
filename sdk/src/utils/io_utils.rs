@@ -11,7 +11,13 @@
 // specific language governing permissions and limitations under
 // each license.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::{
+    ffi::OsStr,
+    io::{Read, Seek, SeekFrom, Write},
+};
+
+#[allow(unused)] // different code path for WASI
+use tempfile::{tempdir, Builder, NamedTempFile, TempDir};
 
 use crate::{Error, Result};
 
@@ -139,6 +145,93 @@ impl<R: Read + Seek> ReaderUtils for R {
 
         Ok(output)
     }
+}
+
+pub(crate) fn tempfile_builder<T: AsRef<OsStr> + Sized>(prefix: T) -> Result<NamedTempFile> {
+    #[cfg(all(target_os = "wasi", target_env = "p1"))]
+    return Error::NotImplemented("tempfile_builder requires wasip2 or later".to_string());
+
+    #[cfg(all(target_os = "wasi", not(target_env = "p1")))]
+    return Builder::new()
+        .prefix(&prefix)
+        .rand_bytes(5)
+        .tempfile_in("/")
+        .map_err(Error::IoError);
+
+    #[cfg(not(target_os = "wasi"))]
+    return Builder::new()
+        .prefix(&prefix)
+        .rand_bytes(5)
+        .tempfile()
+        .map_err(Error::IoError);
+}
+
+#[allow(dead_code)] // used in tests
+pub(crate) fn tempdirectory() -> Result<TempDir> {
+    #[cfg(target_os = "wasi")]
+    return TempDir::new_in("/").map_err(Error::IoError);
+
+    #[cfg(not(target_os = "wasi"))]
+    return tempdir().map_err(Error::IoError);
+}
+
+#[allow(unused)]
+#[cfg(target_os = "wasi")]
+pub fn wasm_remove_dir_all<P: AsRef<std::path::Path>>(path: P) -> Result<()> {
+    for entry in std::fs::read_dir(&path)? {
+        let entry = entry?;
+        let entry_path = entry.path();
+        // List initial entries for debugging
+        eprintln!("Initial entry: {}", entry_path.display());
+        if entry_path.is_file() || entry_path.is_symlink() {
+            eprintln!("Removing file {}", entry_path.display());
+            std::fs::remove_file(&entry_path).map_err(|e| {
+                eprintln!("Failed to remove file {}: {}", entry_path.display(), e);
+                e
+            })?;
+        } else if entry_path.is_dir() {
+            eprintln!("Removing directory: {}", entry_path.display());
+            wasm_remove_dir_all(&entry_path).map_err(|e| {
+                eprintln!("Failed to remove directory {}: {}", entry_path.display(), e);
+                e
+            })?;
+        }
+    }
+
+    // List remaining entries if the directory is still not empty
+    if let Ok(entries) = std::fs::read_dir(&path) {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                eprintln!("Remaining entry before removal: {}", entry.path().display());
+            }
+        }
+    }
+
+    // Retry removing the directory if it fails
+    let mut retries = 3;
+    while retries > 0 {
+        match std::fs::remove_dir_all(&path) {
+            Ok(_) => return Ok(()),
+            Err(e) => {
+                eprintln!(
+                    "Failed to remove directory {}: {}. Retries left: {}",
+                    path.as_ref().display(),
+                    e,
+                    retries - 1
+                );
+                retries -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Other,
+        format!(
+            "Failed to remove directory {} after retries",
+            path.as_ref().display()
+        ),
+    ))?
 }
 
 #[cfg(test)]

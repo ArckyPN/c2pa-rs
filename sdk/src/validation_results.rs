@@ -12,12 +12,15 @@
 // each license.
 
 pub use c2pa_status_tracker::validation_codes::*;
-use c2pa_status_tracker::LogKind;
+use c2pa_status_tracker::{LogKind, StatusTracker};
 #[cfg(feature = "json_schema")]
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::validation_status::ValidationStatus;
+use crate::{
+    assertion::AssertionBase, assertions::Ingredient, jumbf::labels::manifest_label_from_uri,
+    store::Store, validation_status::ValidationStatus,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json_schema", derive(JsonSchema))]
@@ -95,6 +98,84 @@ pub struct ValidationResults {
 }
 
 impl ValidationResults {
+    pub(crate) fn from_store(store: &Store, validation_log: &StatusTracker) -> Self {
+        let mut results = ValidationResults::default();
+
+        let mut statuses: Vec<ValidationStatus> = validation_log
+            .logged_items()
+            .iter()
+            .filter_map(ValidationStatus::from_log_item)
+            .collect();
+
+        // Filter out any status that is already captured in an ingredient assertion.
+        if let Some(claim) = store.provenance_claim() {
+            let active_manifest = Some(claim.label().to_string());
+
+            // This closure returns true if the URI references the store's active manifest.
+            let is_active_manifest = |uri: Option<&str>| {
+                uri.is_some_and(|uri| manifest_label_from_uri(uri) == active_manifest)
+            };
+
+            let make_absolute = |i: Ingredient| {
+                // Get a flat list of validation statuses from the ingredient.
+                // If validation_results are present, use them, otherwise use the ingredient's validation_status.
+                let validation_status = match i.validation_results {
+                    Some(v) => Some(v.validation_status()),
+                    None => i.validation_status.map(|s| {
+                        s.iter()
+                            .map(|s| {
+                                let status = s.to_owned();
+                                // We need to fix up kind since the older validation statuses don't have it set.
+                                let kind = log_kind(status.code());
+                                status.set_kind(kind)
+                            })
+                            .collect()
+                    }),
+                };
+
+                // Convert any relative manifest urls found in ingredient validation statuses to absolute.
+                validation_status.map(|mut statuses| {
+                    if let Some(label) = i
+                        .active_manifest
+                        .as_ref()
+                        .or(i.c2pa_manifest.as_ref())
+                        .map(|m| m.url())
+                        .and_then(|uri| manifest_label_from_uri(&uri))
+                    {
+                        for status in &mut statuses {
+                            status.make_absolute(&label)
+                        }
+                    }
+                    statuses
+                })
+            };
+
+            // We only need to do the more detailed filtering if there are any status
+            // reports that reference ingredients.
+            if statuses.iter().any(|s| !is_active_manifest(s.url())) {
+                // Collect all the ValidationStatus records from all the ingredients in the store.
+                // Since we need to process v1,v2 and v3 ingredients, we process all in the same format.
+                let ingredient_statuses: Vec<ValidationStatus> = store
+                    .claims()
+                    .iter()
+                    .flat_map(|c| c.ingredient_assertions())
+                    .filter_map(|a| Ingredient::from_assertion(a).ok())
+                    .filter_map(make_absolute)
+                    .flatten()
+                    .collect();
+
+                // Filter statuses to only contain those from the active manifest and those not found in any ingredient.
+                statuses.retain(|s| {
+                    is_active_manifest(s.url()) || !ingredient_statuses.iter().any(|i| i == s)
+                })
+            }
+            for status in statuses {
+                results.add_status(status);
+            }
+        }
+        results
+    }
+
     /// Returns the [ValidationState] of the manifest store based on the validation results.
     pub fn validation_state(&self) -> ValidationState {
         let mut is_trusted = true; // Assume the state is trusted until proven otherwise
@@ -158,44 +239,33 @@ impl ValidationResults {
     }
 
     /// Adds a [ValidationStatus] to the [ValidationResults].
-    pub fn add_status(
-        &mut self,
-        active_manifest_label: &str,
-        status: ValidationStatus,
-    ) -> &mut Self {
-        use crate::jumbf::labels::manifest_label_from_uri;
-        let active_manifest_label = active_manifest_label.to_string();
-
-        // This closure returns true if the URI references the store's active manifest.
-        let is_active_manifest = |uri: Option<&str>| {
-            uri.is_some_and(|uri| manifest_label_from_uri(uri) == Some(active_manifest_label))
-        };
-
-        // todo - test if we can just use lack of an ingredient URI to determine if it's the active manifest
-        if is_active_manifest(status.url()) {
-            let scm = self
-                .active_manifest
-                .get_or_insert_with(StatusCodes::default);
-            scm.add_status(status);
-        } else {
-            let ingredient_url = status.ingredient_uri().unwrap_or("NOT FOUND!!!"); //todo: is there an error status for this?
-            let ingredient_vec = self.ingredient_deltas.get_or_insert_with(Vec::new);
-            match ingredient_vec
-                .iter_mut()
-                .find(|idv| idv.ingredient_assertion_uri() == ingredient_url)
-            {
-                Some(idv) => {
-                    idv.validation_deltas_mut().add_status(status);
-                }
-                None => {
-                    let mut idv = IngredientDeltaValidationResult::new(
-                        ingredient_url,
-                        StatusCodes::default(),
-                    );
-                    idv.validation_deltas_mut().add_status(status);
-                    ingredient_vec.push(idv);
-                }
-            };
+    pub fn add_status(&mut self, status: ValidationStatus) -> &mut Self {
+        match status.ingredient_uri() {
+            None => {
+                let scm = self
+                    .active_manifest
+                    .get_or_insert_with(StatusCodes::default);
+                scm.add_status(status);
+            }
+            Some(ingredient_url) => {
+                let ingredient_vec = self.ingredient_deltas.get_or_insert_with(Vec::new);
+                match ingredient_vec
+                    .iter_mut()
+                    .find(|idv| idv.ingredient_assertion_uri() == ingredient_url)
+                {
+                    Some(idv) => {
+                        idv.validation_deltas_mut().add_status(status);
+                    }
+                    None => {
+                        let mut idv = IngredientDeltaValidationResult::new(
+                            ingredient_url,
+                            StatusCodes::default(),
+                        );
+                        idv.validation_deltas_mut().add_status(status);
+                        ingredient_vec.push(idv);
+                    }
+                };
+            }
         }
         self
     }

@@ -20,16 +20,19 @@ use std::{
     path::PathBuf,
 };
 
+#[cfg(feature = "v1_api")]
 use async_trait::async_trait;
-#[cfg(any(feature = "openssl_sign", target_arch = "wasm32"))]
-use c2pa_crypto::cose::TimeStampStorage;
+use c2pa_crypto::{cose::CertificateTrustPolicy, raw_signature::SigningAlg};
+#[cfg(feature = "v1_api")]
 use c2pa_crypto::{
-    cose::CertificateTrustPolicy,
-    raw_signature::{AsyncRawSigner, RawSignerError, SigningAlg},
+    cose::TimeStampStorage,
+    raw_signature::{AsyncRawSigner, RawSignerError},
     time_stamp::{AsyncTimeStampProvider, TimeStampError},
 };
 use tempfile::TempDir;
 
+#[cfg(feature = "v1_api")]
+use crate::signer::RemoteSigner;
 use crate::{
     assertions::{labels, Action, Actions, Ingredient, ReviewRating, SchemaDotOrg, Thumbnail},
     asset_io::CAIReadWrite,
@@ -38,7 +41,7 @@ use crate::{
     jumbf_io::get_assetio_handler,
     salt::DefaultSalt,
     store::Store,
-    AsyncSigner, RemoteSigner, Result,
+    AsyncSigner, Result,
 };
 
 pub const TEST_SMALL_JPEG: &str = "earth_apollo17.jpg";
@@ -79,8 +82,8 @@ pub(crate) fn gen_c2pa_uuid() -> String {
 }
 
 // Returns a non-changing C2PA compatible UUID for testing
-pub(crate) fn static_test_uuid() -> &'static str {
-    const TEST_GUID: &str = "f75ddc48-cdc8-4723-bcfe-77a8d68a5920";
+pub(crate) fn static_test_v1_uuid() -> &'static str {
+    const TEST_GUID: &str = "urn:uuid:f75ddc48-cdc8-4723-bcfe-77a8d68a5920";
     TEST_GUID
 }
 
@@ -190,6 +193,11 @@ pub fn create_test_store() -> Result<Store> {
 
 /// returns a path to a file in the fixtures folder
 pub fn fixture_path(file_name: &str) -> PathBuf {
+    // File paths are relative to directory specified in dir argument.
+    // This assumes `wasmtime --dir .`
+    #[cfg(target_os = "wasi")]
+    let mut path = PathBuf::from("/");
+    #[cfg(not(target_os = "wasi"))]
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.push("tests/fixtures");
     path.push(file_name);
@@ -199,9 +207,7 @@ pub fn fixture_path(file_name: &str) -> PathBuf {
 /// returns a path to a file in the temp_dir folder
 // note, you must pass TempDir from the caller's context
 pub fn temp_dir_path(temp_dir: &TempDir, file_name: &str) -> PathBuf {
-    let mut path = PathBuf::from(temp_dir.path());
-    path.push(file_name);
-    path
+    temp_dir.path().join(file_name)
 }
 
 // copies a fixture to a temp file and returns path to copy
@@ -362,10 +368,12 @@ impl AsyncSigner for AsyncTestGoodSigner {
     }
 }
 
+#[cfg(feature = "v1_api")]
 struct TempRemoteSigner {}
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg(feature = "v1_api")]
 impl crate::signer::RemoteSigner for TempRemoteSigner {
     async fn sign_remote(&self, claim_bytes: &[u8]) -> crate::error::Result<Vec<u8>> {
         let signer = crate::utils::test_signer::async_test_signer(SigningAlg::Ps256);
@@ -386,123 +394,25 @@ impl crate::signer::RemoteSigner for TempRemoteSigner {
     }
 }
 
-/* todo: This test should be replaced by a rust_native signer if desired to sign from wasm
-#[cfg(target_arch = "wasm32")]
-struct WebCryptoSigner {
-    signing_alg: SigningAlg,
-    signing_alg_name: String,
-    certs: Vec<Vec<u8>>,
-    key: Vec<u8>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl WebCryptoSigner {
-    pub fn new(alg: &str, cert: &str, key: &str) -> Self {
-        static START_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----";
-        static END_CERTIFICATE: &str = "-----END CERTIFICATE-----";
-        static START_KEY: &str = "-----BEGIN PRIVATE KEY-----";
-        static END_KEY: &str = "-----END PRIVATE KEY-----";
-
-        let mut name = alg.to_owned().to_uppercase();
-        name.insert(2, '-');
-
-        let key = key
-            .replace("\n", "")
-            .replace(START_KEY, "")
-            .replace(END_KEY, "");
-        let key = c2pa_crypto::base64::decode(&key).unwrap();
-
-        let certs = cert
-            .replace("\n", "")
-            .replace(START_CERTIFICATE, "")
-            .split(END_CERTIFICATE)
-            .map(|x| c2pa_crypto::base64::decode(x).unwrap())
-            .collect();
-
-        Self {
-            signing_alg: alg.parse().unwrap(),
-            signing_alg_name: name,
-            certs,
-            key,
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-#[async_trait::async_trait(?Send)]
-impl AsyncSigner for WebCryptoSigner {
-    fn alg(&self) -> SigningAlg {
-        self.signing_alg
-    }
-
-    fn certs(&self) -> Result<Vec<Vec<u8>>> {
-        Ok(self.certs.clone())
-    }
-
-    async fn sign(&self, claim_bytes: Vec<u8>) -> crate::error::Result<Vec<u8>> {
-        use c2pa_crypto::raw_signature::webcrypto::WindowOrWorker;
-        use js_sys::{Array, Object, Reflect, Uint8Array};
-        use wasm_bindgen_futures::JsFuture;
-        use web_sys::CryptoKey;
-        let context = WindowOrWorker::new().unwrap();
-        let crypto = context.subtle_crypto().unwrap();
-
-        let mut data = claim_bytes.clone();
-        let promise = crypto
-            .digest_with_str_and_u8_array("SHA-256", &mut data)
-            .unwrap();
-        let result = JsFuture::from(promise).await.unwrap();
-        let mut digest = Uint8Array::new(&result).to_vec();
-
-        let key = Uint8Array::new_with_length(self.key.len() as u32);
-        key.copy_from(&self.key);
-        let usages = Array::new();
-        usages.push(&"sign".into());
-        let alg = Object::new();
-        Reflect::set(&alg, &"name".into(), &"ECDSA".into()).unwrap();
-        Reflect::set(&alg, &"namedCurve".into(), &"P-256".into()).unwrap();
-
-        let promise = crypto
-            .import_key_with_object("pkcs8", &key, &alg, true, &usages)
-            .unwrap();
-        let key: CryptoKey = JsFuture::from(promise).await.unwrap().into();
-
-        let alg = Object::new();
-        Reflect::set(&alg, &"name".into(), &"ECDSA".into()).unwrap();
-        Reflect::set(&alg, &"hash".into(), &"SHA-256".into()).unwrap();
-        let promise = crypto
-            .sign_with_object_and_u8_array(&alg, &key, &mut digest)
-            .unwrap();
-        let result = JsFuture::from(promise).await.unwrap();
-        Ok(Uint8Array::new(&result).to_vec())
-    }
-
-    fn reserve_size(&self) -> usize {
-        10000
-    }
-
-    async fn send_timestamp_request(&self, _: &[u8]) -> Option<Result<Vec<u8>>> {
-        None
-    }
-}
-*/
-
 /// Create a [`RemoteSigner`] instance that can be used for testing purposes.
 ///
 /// # Returns
 ///
-/// Returns a boxed [`RemoteSigner`] instance.
+/// Returns a boxed [`RemoteSigner`] instance.X509SignatureVerifier
+#[cfg(feature = "v1_api")]
 pub fn temp_remote_signer() -> Box<dyn RemoteSigner> {
     Box::new(TempRemoteSigner {})
 }
 
 /// Create an AsyncSigner that acts as a RemoteSigner
+#[cfg(feature = "v1_api")]
 struct TempAsyncRemoteSigner {
     signer: TempRemoteSigner,
 }
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+#[cfg(feature = "v1_api")]
 impl AsyncSigner for TempAsyncRemoteSigner {
     // this will not be called but requires an implementation
     async fn sign(&self, claim_bytes: Vec<u8>) -> Result<Vec<u8>> {
@@ -546,6 +456,7 @@ impl AsyncSigner for TempAsyncRemoteSigner {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg(feature = "v1_api")]
 impl AsyncRawSigner for TempAsyncRemoteSigner {
     async fn sign(&self, _claim_bytes: Vec<u8>) -> std::result::Result<Vec<u8>, RawSignerError> {
         unreachable!("Should not be called");
@@ -566,6 +477,7 @@ impl AsyncRawSigner for TempAsyncRemoteSigner {
 
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+#[cfg(feature = "v1_api")]
 impl AsyncTimeStampProvider for TempAsyncRemoteSigner {
     async fn send_time_stamp_request(
         &self,
@@ -580,6 +492,7 @@ impl AsyncTimeStampProvider for TempAsyncRemoteSigner {
 /// # Returns
 ///
 /// Returns a boxed [`RemoteSigner`] instance.
+#[cfg(feature = "v1_api")]
 pub fn temp_async_remote_signer() -> Box<dyn crate::signer::AsyncSigner> {
     Box::new(TempAsyncRemoteSigner {
         signer: TempRemoteSigner {},
