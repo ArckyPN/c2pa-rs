@@ -13,7 +13,6 @@ use url::Url;
 use utility::{is_fragment, is_init};
 
 pub(crate) mod c2pa_builder;
-pub(crate) mod manifest_signer;
 pub(crate) mod merkle_tree;
 pub(crate) mod regexp;
 pub(crate) mod routes;
@@ -26,16 +25,6 @@ use regexp::{Regexp, UriInfo};
 ///
 /// TODO ideally set programmatically, i.e. CLI or ENV
 pub(super) const SEGMENT_LIST_NUM: usize = 5;
-
-// ! MPD / Server Approach code
-/* macro_rules! run_async {
-    ($block:tt) => {
-        rocket::futures::executor::block_on(async { $block })
-    };
-    ($call:stmt) => {
-        run_async!({ $call })
-    };
-} */
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -79,8 +68,6 @@ pub(crate) struct LiveSigner {
 
     /// Merkle Tree group size
     pub window_size: usize,
-    // ! MPD / Server Approach code
-    /* pub cache: Arc<ManifestCache>, */
 }
 
 impl LiveSigner {
@@ -271,16 +258,6 @@ impl LiveSigner {
         Ok(self.target.join(uri)?)
     }
 
-    // ! MPD / Server Approach code
-    /* fn separate_to_c2pa_url<U>(&self, forward: U) -> Result<Url>
-    where
-        U: IntoUrl,
-    {
-        let url = forward.as_str();
-        let url = url.replace("ingest", "c2pa").replace("_separate", "");
-        Ok(Url::parse(&url)?)
-    } */
-
     /// reads all paths associated with the same RepID
     fn paths<P>(&self, name: &str, uri: P) -> Result<Vec<PathBuf>>
     where
@@ -330,15 +307,6 @@ impl LiveSigner {
         Ok(res)
     }
 
-    // ! MPD / Server Approach code
-    /* fn forward_to_uuid_forward(&self, forward: &[(PathBuf, Url)]) -> Result<Vec<Url>> {
-        let mut vec = Vec::new();
-        for (_, url) in forward {
-            vec.push(self.separate_to_c2pa_url(url.clone())?);
-        }
-        Ok(vec)
-    } */
-
     fn rolling_hash_input_paths<P>(&self, name: &str, uri: P) -> Result<(PathBuf, PathBuf)>
     where
         P: AsRef<Path>,
@@ -385,19 +353,7 @@ impl LiveSigner {
     where
         P: AsRef<Path>,
     {
-        // ! MPD / Server Approach code
-        /* let separate_forward = self.forward(name, &uri, Some(ForwardType::Separate))?;
-        let manifest_forward = self
-            .forward(name, &uri, Some(ForwardType::Manifest))?
-            .iter()
-            .map(|f| f.0.clone())
-            .collect::<Vec<PathBuf>>();
-        let uuid_forward = self.forward_to_uuid_forward(&separate_forward)?;
-        let manifest_signer = self.cache.clone(); */
-
         // Rolling Hash signing
-
-        // let UriInfo { rep_id, index: _ } = self.regex.uri(&uri)?;
 
         let builder = self.c2pa.clone();
         let (init, fragment) = self.rolling_hash_input_paths(name, &uri)?;
@@ -464,39 +420,6 @@ impl LiveSigner {
                     let buf = std::fs::read(path)?;
                     client.post(url).body(buf).send()?;
                 }
-
-                // ! MPD / Server Approach code
-                /* // only cache the uuid boxes of the fragments that
-                // will be listed in the Manifests
-                if let Some((media, url)) = run_async!({
-                    let init = &manifest_forward[0];
-
-                    // reverse order to have the segment in chronological order
-                    let mut manifest_forward = manifest_forward[1..].to_vec();
-                    manifest_forward.reverse();
-
-                    manifest_signer
-                        .insert_segment_list(init, &manifest_forward)
-                        .await
-                })? {
-                    // forward MediaPlaylist
-                    client.post(url).body(media).send()?;
-                }
-
-                // forward MPD
-                if let Some((mpd, url)) = run_async!(manifest_signer.mpd_ready().await) {
-                    client.post(url).body(mpd).send()?;
-                }
-
-                // save separated UUID Boxes on server (here: also CDN for simplicity)
-                for ((path, url), c2pa_url) in separate_forward.into_iter().zip(uuid_forward) {
-                    let uuid = extract_c2pa_box(&path)?;
-                    // TODO write c2pa_url into manifests (like other approach instead of into uuid box) - this will save space by not having the life a third time
-                    let fragment = replace_uuid_content(path, c2pa_url.as_str().as_bytes())?;
-
-                    client.post(c2pa_url).body(uuid).send()?;
-                    client.post(url).body(fragment).send()?;
-                } */
 
                 Ok(())
             })?;

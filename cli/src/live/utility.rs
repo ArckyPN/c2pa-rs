@@ -1,6 +1,6 @@
 use std::{
     fs::{read_dir, remove_dir_all},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use anyhow::{bail, Context, Result};
@@ -139,7 +139,7 @@ where
     }
 }
 
-pub(crate) fn extract_c2pa_box<P>(path: P) -> Result<Vec<u8>>
+pub(crate) fn _extract_c2pa_box<P>(path: P) -> Result<Vec<u8>>
 where
     P: AsRef<Path>,
 {
@@ -178,19 +178,6 @@ where
     } else {
         bail!("missing c2pa box in {:?}", path.as_ref())
     }
-}
-
-pub(crate) fn find_init<P>(dir: P) -> Result<PathBuf>
-where
-    P: AsRef<Path>,
-{
-    for entry in dir.as_ref().read_dir()? {
-        let path = entry?.path();
-        if is_init(&path) {
-            return Ok(path);
-        }
-    }
-    bail!("could not find init")
 }
 
 #[allow(dead_code)]

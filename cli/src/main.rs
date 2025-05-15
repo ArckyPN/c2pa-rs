@@ -774,10 +774,6 @@ fn main() -> Result<()> {
                         "/ingest",
                         rocket::routes![live::routes::post_ingest, live::routes::delete_ingest],
                     )
-                    .mount(
-                        "/verify",
-                        rocket::routes![live::routes::verify_rolling_hash],
-                    )
                     // .mount("/", rocket::routes![live::routes::get_merkle_tree])
                     .manage(live::LiveSigner {
                         media: output.clone(),
@@ -790,8 +786,6 @@ fn main() -> Result<()> {
                         },
                         regex: re.clone(),
                         window_size: *window_size,
-                        // ! MPD / Server Approach code
-                        /* cache: Arc::new(ManifestCache::new(re)), */
                     })
                     .attach(rocket::fairing::AdHoc::on_shutdown("media cleaner", |_| {
                         Box::pin(async move {
