@@ -48,7 +48,7 @@ use crate::{
 
 const ASSERTION_CREATION_VERSION: usize = 2;
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct ExclusionsMap {
     pub xpath: String,
     pub length: Option<u32>,
@@ -232,14 +232,14 @@ pub struct BmffMerkleMap {
     pub hashes: Option<VecByteBuf>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct DataMap {
     pub offset: u32,
     #[serde(with = "serde_bytes")]
     pub value: Vec<u8>,
 }
 
-#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 pub struct SubsetMap {
     pub offset: u32,
     pub length: u32,
@@ -1146,18 +1146,24 @@ impl BmffHash {
         rolling_hash: &[u8],
         previous_hash: &[u8],
     ) -> crate::Result<()> {
-        let curr_alg = match &self.alg {
-            Some(a) => a.clone(),
-            None => match alg {
-                Some(a) => a.to_owned(),
-                None => "sha256".to_string(),
-            },
+        let curr_alg = match alg {
+            Some(a) => a.to_owned(),
+            None => "sha256".to_string(),
         };
 
-        // TODO parse Exclusion from the Fragment itself
+        let c2pa_boxes = C2PABmffBoxesRollingHash::from_reader(fragment_stream)?;
+
+        // ensure there aren't more than one uuid box
+        if c2pa_boxes.rolling_hashes.len() > 1 || c2pa_boxes.bmff_merkle_box_infos.len() > 1 {
+            return Err(Error::HashMismatch(
+                "BMFF Fragments shouldn't have more than 1 BmffMerkleMap".to_string(),
+            ));
+        }
+
+        let exclusions = &c2pa_boxes.rolling_hashes[0].exclusions;
 
         // hash fragment stream
-        let exclusions = bmff_to_jumbf_exclusions(fragment_stream, &self.exclusions, true)?;
+        let exclusions = bmff_to_jumbf_exclusions(fragment_stream, exclusions, true)?;
         let frag_hash = hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
 
         let ref_hash = concat_and_hash(&curr_alg, previous_hash, Some(&frag_hash));
@@ -1502,6 +1508,7 @@ impl BmffHash {
         // box content is simply the previous rolling hash
         let anchor_data = FragmentRollingHash {
             anchor_point: self.previous_hash().cloned().map(|inner| inner.into()),
+            exclusions: self.exclusions.clone(),
         };
         let anchor_data = serde_cbor::to_vec(&anchor_data)
             .map_err(|err| Error::AssertionEncoding(err.to_string()))?;
@@ -1693,6 +1700,7 @@ impl RollingHash {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct FragmentRollingHash {
     pub(crate) anchor_point: Option<ByteBuf>,
+    exclusions: Vec<ExclusionsMap>,
 }
 
 /* we need shippable examples
