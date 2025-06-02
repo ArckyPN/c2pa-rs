@@ -2227,12 +2227,14 @@ impl Claim {
                             _,
                             rolling_hash,
                             previous_hash,
-                        ) => dh.verify_fragment_memory(
-                            *fragment_data,
-                            Some(claim.alg()),
-                            rolling_hash,
-                            previous_hash,
-                        ),
+                        ) => dh
+                            .verify_fragment_memory(
+                                *fragment_data,
+                                Some(claim.alg()),
+                                rolling_hash,
+                                previous_hash,
+                            )
+                            .map(|_| ()),
                     };
 
                     match hash_result {

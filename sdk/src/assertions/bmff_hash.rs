@@ -1145,7 +1145,7 @@ impl BmffHash {
         alg: Option<&str>,
         rolling_hash: &[u8],
         previous_hash: &[u8],
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Vec<u8>> {
         let curr_alg = match alg {
             Some(a) => a.to_owned(),
             None => "sha256".to_string(),
@@ -1171,7 +1171,7 @@ impl BmffHash {
         if ref_hash != rolling_hash {
             return Err(Error::HashMismatch("missing rolling hash".to_string()));
         }
-        Ok(())
+        Ok(rolling_hash.to_vec())
     }
 
     #[cfg(feature = "file_io")]

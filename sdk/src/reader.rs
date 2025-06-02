@@ -349,11 +349,9 @@ impl Reader {
         mut fragment: impl Read + Seek + Send,
         rolling_hash: &[u8],
         previous_hash: &[u8],
-    ) -> bool {
+    ) -> Result<Vec<u8>> {
         let bmff_hash = crate::assertions::BmffHash::new("", "sha256", None);
-        bmff_hash
-            .verify_fragment_memory(&mut fragment, Some("sha256"), rolling_hash, previous_hash)
-            .is_ok()
+        bmff_hash.verify_fragment_memory(&mut fragment, Some("sha256"), rolling_hash, previous_hash)
     }
 
     #[cfg(feature = "file_io")]
