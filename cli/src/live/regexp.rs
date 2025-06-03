@@ -69,7 +69,7 @@ impl Regexp {
         P: AsRef<Path>,
     {
         let uri = uri.as_ref().to_str().context("invalid URI")?;
-        let capture = self.fragment.captures(uri).context("no matches")?;
+        let capture = self.fragment.captures(uri).context("no matches uri")?;
 
         let index = match &capture["index"] {
             "init" => FragmentIndex::Init,
@@ -82,7 +82,11 @@ impl Regexp {
         })
     }
 
-    pub fn manifest(&self, url: &str) -> Result<UriInfo> {
+    pub fn manifest<P>(&self, url: P) -> Result<UriInfo>
+    where
+        P: AsRef<Path>,
+    {
+        let url = url.as_ref().to_string_lossy().to_string();
         if url.contains(".mpd") {
             Ok(UriInfo {
                 rep_id: 0,
@@ -94,7 +98,10 @@ impl Regexp {
                 index: FragmentIndex::Manifest(ManifestTypes::Master),
             })
         } else if url.contains("media_") {
-            let capture = self.playlist.captures(url).context("no matches")?;
+            let capture = self
+                .playlist
+                .captures(&url)
+                .context("no matches manifest")?;
 
             Ok(UriInfo {
                 rep_id: capture["rep"].parse()?,
@@ -110,7 +117,7 @@ impl Default for Regexp {
     fn default() -> Self {
         Self {
             fragment: Regex::new(r"(?P<rep>\d+)/segment_0*(?P<index>\d+|init)\.m4s").unwrap(),
-            playlist: Regex::new(r"/media_(?P<rep>\d+).m3u8").unwrap(),
+            playlist: Regex::new(r"media_(?P<rep>\d+)\.m3u8").unwrap(),
         }
     }
 }

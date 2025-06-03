@@ -5,6 +5,10 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use bytes::{Buf, Bytes};
+use c2pa::{
+    assertions::{labels::BMFF_HASH_2, BmffHash},
+    Reader,
+};
 use rocket::{
     data::ByteUnit,
     tokio::{
@@ -13,6 +17,8 @@ use rocket::{
     },
     Data,
 };
+
+use crate::live::manifold::EventPayload;
 
 const MAX_CHUNK_SIZE: usize = u16::MAX as usize;
 
@@ -228,6 +234,24 @@ pub(crate) fn mpd_num_reps(mpd: &dash_mpd::MPD) -> usize {
     }
 
     num
+}
+
+pub(crate) fn get_event_data<P>(init: P) -> Result<EventPayload>
+where
+    P: AsRef<Path>,
+{
+    let manifest = Reader::from_file(init)?;
+    let manifest = manifest
+        .active_manifest()
+        .context("missing active manifest")?;
+    let hash = manifest.find_assertion::<BmffHash>(BMFF_HASH_2)?;
+    let rh = hash.rolling_hash().context("not rolling hash signed")?;
+
+    let rolling_hash = rh.rolling_hash().context("missing rolling hash")?;
+
+    let anchor_point = rh.previous_hash().cloned();
+
+    Ok(EventPayload::new(rolling_hash, &anchor_point))
 }
 
 #[cfg(test)]

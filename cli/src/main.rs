@@ -786,6 +786,7 @@ fn main() -> Result<()> {
                         },
                         regex: re.clone(),
                         window_size: *window_size,
+                        manifold: Default::default(),
                     })
                     .attach(rocket::fairing::AdHoc::on_shutdown("media cleaner", |_| {
                         Box::pin(async move {

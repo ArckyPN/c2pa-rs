@@ -13,6 +13,7 @@ use url::Url;
 use utility::{is_fragment, is_init};
 
 pub(crate) mod c2pa_builder;
+pub(crate) mod manifold;
 pub(crate) mod merkle_tree;
 pub(crate) mod regexp;
 pub(crate) mod routes;
@@ -21,10 +22,13 @@ pub(crate) mod utility;
 use c2pa_builder::C2PABuilder;
 use regexp::{Regexp, UriInfo};
 
+use crate::live::{manifold::Manifold, utility::get_event_data};
+
 /// FFmpeg -window_size argument
 ///
 /// TODO ideally set programmatically, i.e. CLI or ENV
 pub(super) const SEGMENT_LIST_NUM: usize = 5;
+pub(super) const ROLLING_HASH_SCHEME_URI: &str = "fame.c2pa.rolling-hash";
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
@@ -68,6 +72,9 @@ pub(crate) struct LiveSigner {
 
     /// Merkle Tree group size
     pub window_size: usize,
+
+    /// C2PA Data distributer (used for writing Rolling Hash into Manifests)
+    pub manifold: Arc<Manifold>,
 }
 
 impl LiveSigner {
@@ -361,6 +368,8 @@ impl LiveSigner {
         let output = self.output(name, &init, ForwardType::RollingHash)?;
         let signed_forward = self.rolling_hash_forward_urls(name, &init, &fragment)?;
         let client = self.sync_client.clone();
+        let manifold = self.manifold.clone();
+        let UriInfo { rep_id, index: _ } = self.regex.uri(&uri)?;
         thread::Builder::new()
             .name(format!("Rolling Hash {name} - {:?}", uri.as_ref()))
             .spawn(move || -> Result<()> {
@@ -368,12 +377,20 @@ impl LiveSigner {
                 let mut c2pa = builder.builder()?;
 
                 // sign
-                if let Err(err) =
-                    c2pa.sign_live_bmff(signer.as_ref(), init, &vec![fragment], output, None)
-                {
+                if let Err(err) = c2pa.sign_live_bmff(
+                    signer.as_ref(),
+                    init,
+                    &vec![fragment],
+                    output.clone(),
+                    None,
+                ) {
                     log::error!("Sign: {err}");
                     bail!("Sign: {err}")
                 }
+
+                // TODO extract rolling hash and anchor point and write manifold
+                let event_data = get_event_data(output)?;
+                manifold.insert(&rep_id.to_string(), event_data);
 
                 // forward signed fragments to signed
                 for (path, url) in signed_forward {
