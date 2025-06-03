@@ -1144,7 +1144,7 @@ impl BmffHash {
         fragment_stream: &mut dyn CAIRead,
         alg: Option<&str>,
         rolling_hash: &[u8],
-        previous_hash: &[u8],
+        anchor_point: &Option<Vec<u8>>,
     ) -> crate::Result<Vec<u8>> {
         let curr_alg = match alg {
             Some(a) => a.to_owned(),
@@ -1160,16 +1160,32 @@ impl BmffHash {
             ));
         }
 
-        let exclusions = &c2pa_boxes.rolling_hashes[0].exclusions;
+        let anchor_point = if let Some(ap) = anchor_point {
+            // use given anchor point
+            Some(ap.to_owned())
+        } else {
+            // otherwise attempt to use the one found in the fragment
+            c2pa_boxes.rolling_hashes[0]
+                .anchor_point
+                .as_ref()
+                .map(|ap| ap.to_vec())
+                .clone()
+        };
 
         // hash fragment stream
+        let exclusions = &c2pa_boxes.rolling_hashes[0].exclusions;
         let exclusions = bmff_to_jumbf_exclusions(fragment_stream, exclusions, true)?;
         let frag_hash = hash_stream_by_alg(&curr_alg, fragment_stream, Some(exclusions), true)?;
 
-        let ref_hash = concat_and_hash(&curr_alg, previous_hash, Some(&frag_hash));
+        // create rolling hash from fragment hash and optional anchor point
+        let (left, right) = match anchor_point {
+            Some(ap) => (ap, Some(frag_hash)),
+            None => (frag_hash, None),
+        };
+        let ref_hash = concat_and_hash(&curr_alg, &left, right.as_deref());
 
         if ref_hash != rolling_hash {
-            return Err(Error::HashMismatch("missing rolling hash".to_string()));
+            return Err(Error::HashMismatch("mismatching rolling hash".to_string()));
         }
         Ok(rolling_hash.to_vec())
     }

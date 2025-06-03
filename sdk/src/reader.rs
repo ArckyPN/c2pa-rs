@@ -316,7 +316,7 @@ impl Reader {
         mut stream: impl Read + Seek + Send,
         mut fragment: impl Read + Seek + Send,
         rolling_hash: &[u8],
-        previous_hash: &[u8],
+        anchor_point: &Option<Vec<u8>>,
     ) -> Result<Self> {
         let mut validation_log = StatusTracker::default();
         let manifest_bytes = Store::load_jumbf_from_stream(format, &mut stream)?;
@@ -329,7 +329,7 @@ impl Reader {
                 &mut fragment,
                 format,
                 rolling_hash,
-                previous_hash,
+                anchor_point,
             );
             if _sync {
                 // verify store and claims
@@ -348,10 +348,10 @@ impl Reader {
     pub fn from_rolling_hash_memory_hack(
         mut fragment: impl Read + Seek + Send,
         rolling_hash: &[u8],
-        previous_hash: &[u8],
+        anchor_point: &Option<Vec<u8>>,
     ) -> Result<Vec<u8>> {
         let bmff_hash = crate::assertions::BmffHash::new("", "sha256", None);
-        bmff_hash.verify_fragment_memory(&mut fragment, Some("sha256"), rolling_hash, previous_hash)
+        bmff_hash.verify_fragment_memory(&mut fragment, Some("sha256"), rolling_hash, anchor_point)
     }
 
     #[cfg(feature = "file_io")]

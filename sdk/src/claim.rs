@@ -93,7 +93,7 @@ pub enum ClaimAssetData<'a> {
     /// validate a Rolling Hash Init File, Fragment with a Previous Hash from Memory
     RollingHash(&'a mut dyn CAIRead, &'a mut dyn CAIRead, &'a str, &'a [u8]),
     /// validate a Rolling Hash Fragment with a Previous Hash and Rolling Hash from Memory
-    RollingHashFragment(&'a mut dyn CAIRead, &'a str, &'a [u8], &'a [u8]),
+    RollingHashFragment(&'a mut dyn CAIRead, &'a str, &'a [u8], &'a Option<Vec<u8>>),
 }
 
 #[derive(PartialEq, Debug, Eq, Clone)]

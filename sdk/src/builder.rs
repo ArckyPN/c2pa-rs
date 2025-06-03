@@ -2324,7 +2324,7 @@ mod tests {
             &mut init_fp,
             &mut signed_frag,
             rolling_hash,
-            previous_hash,
+            &Some(previous_hash.clone()),
         )
         .unwrap();
 
